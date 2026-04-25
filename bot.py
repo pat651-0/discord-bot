@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands
+import os
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -8,8 +9,8 @@ intents.guilds = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # 🔥 YOUR SETTINGS
-STAFF_ROLE_ID = 1470379426297548957  # your yapper role ID
-CATEGORY_ID = 1472896391717195807  # 🔁 REPLACE THIS
+STAFF_ROLE_ID = 1470379426297548957  # yapper role ID
+CATEGORY_ID = 1472860643475329096     # 🔁 REPLACE WITH YOUR TICKETS CATEGORY ID
 
 # ---------------- READY ----------------
 @bot.event
@@ -75,5 +76,5 @@ async def ticket(ctx):
 
     await ctx.send(embed=embed, view=TicketButton())
 
-# 🔑 RUN BOT
-bot.run("YOUR_BOT_TOKEN")
+# 🔑 RUN BOT (Railway uses env variable)
+bot.run(os.getenv("TOKEN"))
