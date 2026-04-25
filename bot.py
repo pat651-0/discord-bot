@@ -18,24 +18,22 @@ async def on_message(message):
         return
 
     # Tickety handling
-    if message.author.bot and message.author.name == "Tickety":
+if message.author.bot and message.author.name == "Tickety":
 
-        # delete any ping messages from Tickety
-        if message.mentions:
-            await message.delete()
-            return
+    if message.embeds:
+        embed = message.embeds[0]
+        title = embed.title or ""
 
-        # ticket created → ping you
-        if "Ticket Created" in message.content or "Ticket Created" in str(message.embeds):
+        # 🎟️ Ticket Created
+        if "Ticket Created" in title:
             await message.delete()
             await message.channel.send(f"<@1137385938155221073> 🎟️ New ticket created!")
             return
 
-        # ticket closed → just delete
-        if "Ticket Closed" in message.content or "Ticket Closed" in str(message.embeds):
+        # ❌ Ticket Closed
+        if "Ticket Closed" in title:
             await message.delete()
             return
-
     # block @everyone
     if message.mention_everyone:
         await message.delete()
