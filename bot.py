@@ -14,44 +14,47 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
+    # ignore bot itself
     if message.author == bot.user:
         return
 
-    # Tickety handling
+    # 🎟️ Tickety handling
     if message.author.bot and message.author.name == "Tickety":
 
-        if message.embeds:
-            embed = message.embeds[0]
-            title = embed.title or ""
+        # wait so message exists properly
+        await asyncio.sleep(1)
 
-            # 🎟️ Ticket Created
-            if "Ticket Created" in title:
-                await asyncio.sleep(1)  # 👈 delay fixes error
-                try:
-                    await message.delete()
-                except:
-                    pass
+        try:
+            # delete ping messages
+            if message.mentions:
+                await message.delete()
+                return
+
+            # ticket created
+            if "Ticket Created" in message.content or "Ticket Created" in str(message.embeds):
+                await message.delete()
                 await message.channel.send(f"<@1137385938155221073> 🎟️ New ticket created!")
                 return
 
-            # ❌ Ticket Closed
-            if "Ticket Closed" in title:
-                await asyncio.sleep(1)  # 👈 delay fixes error
-                try:
-                    await message.delete()
-                except:
-                    pass
+            # ticket closed
+            if "Ticket Closed" in message.content or "Ticket Closed" in str(message.embeds):
+                await message.delete()
                 return
 
-    # block @everyone
+        except:
+            pass  # prevents Unknown Message error
+
+    # 🚫 block @everyone
     if message.mention_everyone:
         try:
             await message.delete()
+            await message.channel.send("No @everyone allowed ❌")
         except:
             pass
-        await message.channel.send("No @everyone allowed ❌")
         return
 
+    # allow commands to still work
     await bot.process_commands(message)
+
 
 bot.run(os.getenv("TOKEN"))
