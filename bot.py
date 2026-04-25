@@ -9,8 +9,9 @@ intents.guilds = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # 🔥 YOUR SETTINGS
-STAFF_ROLE_ID = 1470379426297548957
-CATEGORY_ID = 1472896391717195807
+STAFF_ROLE_ID = 123456789012345678  # replace
+CATEGORY_ID = 123456789012345678   # replace
+
 # ---------------- READY ----------------
 @bot.event
 async def on_ready():
@@ -31,47 +32,51 @@ class TicketButton(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="🎫 Create Ticket", style=discord.ButtonStyle.green)
+    @discord.ui.button(label="🎟 Create Ticket", style=discord.ButtonStyle.green)
     async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild = interaction.guild
         user = interaction.user
 
-        # 🔍 find category
-       category = guild.get_channel(1472896391717195807)
+        # find category
+        category = guild.get_channel(CATEGORY_ID)
         if category is None:
             await interaction.response.send_message("❌ Category not found!", ephemeral=True)
             return
 
-        # 🛡 permissions
+        # permissions
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             user: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-            guild.get_role(STAFF_ROLE_ID): discord.PermissionOverwrite(view_channel=True, send_messages=True),
+            guild.get_role(STAFF_ROLE_ID): discord.PermissionOverwrite(view_channel=True)
         }
 
-        # 📁 create channel in correct category
+        # create channel
         channel = await guild.create_text_channel(
             name=f"ticket-{user.name}",
-            overwrites=overwrites,
-            category=category
+            category=category,
+            overwrites=overwrites
         )
 
-        # 📩 send message with close button
+        # send message inside ticket
         await channel.send(
-            f"{user.mention} 🎫 Your ticket is open!\nPress below to close.",
+            f"{user.mention} 🎟 Ticket created",
             view=CloseButton()
         )
 
-        await interaction.response.send_message(f"✅ Ticket created: {channel.mention}", ephemeral=True)
+        await interaction.response.send_message(
+            f"✅ Ticket created: {channel.mention}",
+            ephemeral=True
+        )
 
-# ---------------- PANEL COMMAND ----------------
+# ---------------- COMMAND ----------------
 @bot.command()
-async def panel(ctx):
+async def setup(ctx):
     embed = discord.Embed(
-        title="🎫 Ticket Machine",
+        title="🎟 Ticket Machine",
         description="Click the button below to create a ticket.",
         color=discord.Color.green()
     )
+
     await ctx.send(embed=embed, view=TicketButton())
 
 # ---------------- RUN ----------------
