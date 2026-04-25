@@ -3,46 +3,55 @@ from discord.ext import commands
 import os
 import asyncio
 
+# intents
 intents = discord.Intents.default()
 intents.message_content = True
 
+# bot
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# ready
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
 
+# main handler
 @bot.event
 async def on_message(message):
-    # ignore bot itself
+    # ignore itself
     if message.author == bot.user:
         return
 
     # 🎟️ Tickety handling
-    if message.author.bot and message.author.name == "Tickety":
+    if message.author.bot and message.author.name.lower() == "tickety":
 
-        # wait so message exists properly
+        # wait so message fully loads (fixes unknown message error)
         await asyncio.sleep(1)
 
         try:
-            # delete ping messages
+            # handle embeds (Tickety uses embeds)
+            if message.embeds:
+                embed = message.embeds[0]
+                title = embed.title or ""
+
+                # ticket created
+                if "Ticket Created" in title:
+                    await message.delete()
+                    await message.channel.send(f"<@1137385938155221073> 🎟️ New ticket created!")
+                    return
+
+                # ticket closed
+                if "Ticket Closed" in title:
+                    await message.delete()
+                    return
+
+            # fallback (mentions)
             if message.mentions:
                 await message.delete()
                 return
 
-            # ticket created
-            if "Ticket Created" in message.content or "Ticket Created" in str(message.embeds):
-                await message.delete()
-                await message.channel.send(f"<@1137385938155221073> 🎟️ New ticket created!")
-                return
-
-            # ticket closed
-            if "Ticket Closed" in message.content or "Ticket Closed" in str(message.embeds):
-                await message.delete()
-                return
-
         except:
-            pass  # prevents Unknown Message error
+            pass  # stops crashes
 
     # 🚫 block @everyone
     if message.mention_everyone:
@@ -53,8 +62,9 @@ async def on_message(message):
             pass
         return
 
-    # allow commands to still work
+    # allow commands
     await bot.process_commands(message)
 
 
+# run bot
 bot.run(os.getenv("TOKEN"))
