@@ -8,26 +8,13 @@ intents.guilds = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# 🔥 YOUR SETTINGS
-STAFF_ROLE_ID = 123456789012345678  # replace
-CATEGORY_ID = 123456789012345678   # replace
+# YOUR ROLE ID (optional but recommended)
+STAFF_ROLE_ID = 123456789012345678  # replace or remove if you want
 
-# ---------------- READY ----------------
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
 
-# ---------------- CLOSE BUTTON ----------------
-class CloseButton(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.red)
-    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("Closing ticket...", ephemeral=True)
-        await interaction.channel.delete()
-
-# ---------------- CREATE BUTTON ----------------
 class TicketButton(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -37,30 +24,19 @@ class TicketButton(discord.ui.View):
         guild = interaction.guild
         user = interaction.user
 
-        # find category
-        category = guild.get_channel(CATEGORY_ID)
-        if category is None:
-            await interaction.response.send_message("❌ Category not found!", ephemeral=True)
-            return
-
-        # permissions
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             user: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-            guild.get_role(STAFF_ROLE_ID): discord.PermissionOverwrite(view_channel=True)
         }
 
-        # create channel
+        # OPTIONAL: add staff role access
+        staff_role = guild.get_role(STAFF_ROLE_ID)
+        if staff_role:
+            overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True)
+
         channel = await guild.create_text_channel(
             name=f"ticket-{user.name}",
-            category=category,
             overwrites=overwrites
-        )
-
-        # send message inside ticket
-        await channel.send(
-            f"{user.mention} 🎟 Ticket created",
-            view=CloseButton()
         )
 
         await interaction.response.send_message(
@@ -68,7 +44,6 @@ class TicketButton(discord.ui.View):
             ephemeral=True
         )
 
-# ---------------- COMMAND ----------------
 @bot.command()
 async def setup(ctx):
     embed = discord.Embed(
@@ -79,5 +54,4 @@ async def setup(ctx):
 
     await ctx.send(embed=embed, view=TicketButton())
 
-# ---------------- RUN ----------------
 bot.run(os.getenv("TOKEN"))
