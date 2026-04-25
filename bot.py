@@ -13,37 +13,36 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
+ async def on_message(message):
     if message.author == bot.user:
         return
 
-    if message.mention_everyone:
-        await message.delete()
-        await message.channel.send("No @everyone allowed 🚫")
-        return
- # Tickety handling
+    # Tickety handling
     if message.author.bot and message.author.name == "Tickety":
 
-        # Ticket created → ping you
-        if "Ticket Created" in message.content or "Ticket Created" in str(message.embeds):
+        # delete any ping messages from Tickety
+        if message.mentions:
             await message.delete()
-            await message.channel.send(f"<1137385938155221073> 🎫 New ticket created!")
             return
 
-        # Ticket closed → just delete
+        # ticket created → ping you
+        if "Ticket Created" in message.content or "Ticket Created" in str(message.embeds):
+            await message.delete()
+            await message.channel.send(f"<@1137385938155221073> 🎟️ New ticket created!")
+            return
+
+        # ticket closed → just delete
         if "Ticket Closed" in message.content or "Ticket Closed" in str(message.embeds):
             await message.delete()
             return
 
-    # Ping command
-    if message.content == "ping":
-        await message.channel.send("pong")
+    # block @everyone
+    if message.mention_everyone:
+        await message.delete()
+        await message.channel.send("No @everyone allowed ❌")
+        return
 
-    await bot.process_commands(message)
-    if message.content == "ping":
-        await message.channel.send("pong")
-
-    await bot.process_commands(message)
-
+    await bot.process_commands(message)   
 bot.run(os.getenv("TOKEN"))
 
 
