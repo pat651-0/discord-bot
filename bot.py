@@ -1,3 +1,20 @@
+import discord
+from discord.ext import commands
+import os
+
+# intents
+intents = discord.Intents.default()
+intents.message_content = True
+
+# bot setup
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# ready event
+@bot.event
+async def on_ready():
+    print(f"Logged in as {bot.user}")
+
+# message handler
 @bot.event
 async def on_message(message):
     # ignore self
@@ -7,7 +24,6 @@ async def on_message(message):
     # Tickety handling
     if message.author.bot and message.author.name == "Tickety":
 
-        # check embeds safely
         if message.embeds:
             embed = message.embeds[0]
             title = embed.title or ""
@@ -29,8 +45,8 @@ async def on_message(message):
         await message.channel.send("No @everyone allowed ❌")
         return
 
-    # keep commands working
+    # allow commands
     await bot.process_commands(message)
 
-
-
+# run bot
+bot.run(os.getenv("TOKEN"))
