@@ -15,6 +15,9 @@ async def on_ready():
 async def on_message(message):
     if message.author == bot.user:
         return
+  if "@everyone" in message.content:
+        await message.delete()
+        await message.channel.send("No @everyone allowed 🚫")
 
     if message.content == "ping":
         await message.channel.send("pong")
