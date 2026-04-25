@@ -8,9 +8,9 @@ intents.guilds = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# 🔥 CHANGE THESE
+# 🔥 YOUR SETTINGS
 STAFF_ROLE_ID = 1470379426297548957
-CATEGORY_NAME = "Tickets"  # EXACT name of your category
+CATEGORY_NAME = "Tickets 🎫"  # MUST match EXACTLY
 
 # ---------------- READY ----------------
 @bot.event
@@ -32,7 +32,7 @@ class TicketButton(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="🎟 Create Ticket", style=discord.ButtonStyle.green)
+    @discord.ui.button(label="🎫 Create Ticket", style=discord.ButtonStyle.green)
     async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild = interaction.guild
         user = interaction.user
@@ -51,15 +51,16 @@ class TicketButton(discord.ui.View):
             guild.get_role(STAFF_ROLE_ID): discord.PermissionOverwrite(view_channel=True, send_messages=True),
         }
 
-        # 📁 create channel in category
+        # 📁 create channel in correct category
         channel = await guild.create_text_channel(
             name=f"ticket-{user.name}",
             overwrites=overwrites,
             category=category
         )
 
+        # 📩 send message with close button
         await channel.send(
-            f"{user.mention} 🎟 Ticket created!\nPress the button below to close.",
+            f"{user.mention} 🎫 Your ticket is open!\nPress below to close.",
             view=CloseButton()
         )
 
@@ -69,7 +70,7 @@ class TicketButton(discord.ui.View):
 @bot.command()
 async def panel(ctx):
     embed = discord.Embed(
-        title="🎟 Ticket Machine",
+        title="🎫 Ticket Machine",
         description="Click the button below to create a ticket.",
         color=discord.Color.green()
     )
