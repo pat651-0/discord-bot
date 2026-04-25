@@ -10,8 +10,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # 🔥 YOUR SETTINGS
 STAFF_ROLE_ID = 1470379426297548957
-CATEGORY_NAME = "Tickets 🎫"  # MUST match EXACTLY
-
+CATEGORY_ID = 1472896391717195807
 # ---------------- READY ----------------
 @bot.event
 async def on_ready():
@@ -38,8 +37,7 @@ class TicketButton(discord.ui.View):
         user = interaction.user
 
         # 🔍 find category
-        category = discord.utils.get(guild.categories, name=CATEGORY_NAME)
-
+       category = guild.get_channel(1472896391717195807)
         if category is None:
             await interaction.response.send_message("❌ Category not found!", ephemeral=True)
             return
