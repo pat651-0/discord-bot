@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands
+import os
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -12,29 +13,15 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-
-    @bot.event
-async def on_message(message):
-    if message.author.bot:
+    if message.author == bot.user:
         return
 
-    # detect ticket close
-    if "ticket closed" in message.content.lower():
-        await message.channel.send("Closing ticket in 5 seconds...")
-        await message.channel.delete(delay=5)
-
-    # delete transcripts/logs
-    if "transcript" in message.content.lower():
-        try:
-            await message.delete(delay=5)
-        except:
-            pass
+    if message.content == "ping":
+        await message.channel.send("pong")
 
     await bot.process_commands(message)
 
-import os
-bot.run(os.getnev("TOKEN"))
-
+bot.run(os.getenv("TOKEN"))
 
 
 
