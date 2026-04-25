@@ -20,21 +20,23 @@ async def on_message(message):
     # Tickety handling
     if message.author.bot and message.author.name == "Tickety":
 
-      if message.embeds:
-    embed = message.embeds[0]
-    title = embed.title or ""
+    # Tickety handling
+if message.author.bot and message.author.name == "Tickety":
 
-    # 🎟️ Ticket Created
-    if "Ticket Created" in title:
-        await message.delete()
-        await message.channel.send(f"<@1137385938155221073> 🎟️ New ticket created!")
-        return
+    if message.embeds:
+        embed = message.embeds[0]
+        title = embed.title or ""
 
-    # ❌ Ticket Closed
-    if "Ticket Closed" in title:
-        await message.delete()
-        return
+        # 🎟️ Ticket Created
+        if "Ticket Created" in title:
+            await message.delete()
+            await message.channel.send(f"<@1137385938155221073> 🎟️ New ticket created!")
+            return
 
+        # ❌ Ticket Closed
+        if "Ticket Closed" in title:
+            await message.delete()
+            return
     if message.mention_everyone:
         await message.delete()
         await message.channel.send("No @everyone allowed ❌")
