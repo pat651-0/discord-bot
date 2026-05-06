@@ -42,7 +42,6 @@ async def on_message(message):
 
     print(f"Got message in #{message.channel}: {message.content}")
 
-    # This proves Sloty can send messages
     if message.content.lower() == "!ping":
         try:
             await message.channel.send("🏓 Sloty can send messages!")
@@ -142,9 +141,9 @@ async def on_command_error(ctx, error):
         await ctx.send("❌ Something went wrong. Check Railway logs.")
 
 # ---------------- RUN ----------------
-token = os.getenv("TOKEN")
+token = os.getenv("TOKEN2")
 
 if token is None:
-    print("❌ TOKEN not found. Add TOKEN in Railway Variables.")
+    print("❌ TOKEN2 not found. Add TOKEN2 in Railway Variables.")
 else:
     bot.run(token)
