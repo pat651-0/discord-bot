@@ -1,6 +1,7 @@
 import discord
 from discord.ext import commands
 import os
+import re
 
 # ---------------- INTENTS ----------------
 intents = discord.Intents.default()
@@ -13,6 +14,14 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 STAFF_ROLE_ID = 1470379426297548957
 CATEGORY_ID = 1472896391717195807
 
+
+def clean_channel_name(name):
+    name = name.lower()
+    name = re.sub(r"[^a-z0-9-]", "-", name)
+    name = re.sub(r"-+", "-", name)
+    return name[:40].strip("-")
+
+
 # ---------------- CLOSE BUTTON ----------------
 class CloseButton(discord.ui.View):
     def __init__(self):
@@ -24,8 +33,11 @@ class CloseButton(discord.ui.View):
         custom_id="yapper_close_ticket"
     )
     async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("Closing ticket...", ephemeral=True)
-        await interaction.channel.delete()
+        try:
+            await interaction.response.send_message("Closing ticket...", ephemeral=True)
+            await interaction.channel.delete()
+        except Exception as e:
+            print(f"Close ticket error: {e}")
 
 
 # ---------------- CREATE TICKET BUTTON ----------------
@@ -39,76 +51,98 @@ class TicketButton(discord.ui.View):
         custom_id="yapper_create_ticket"
     )
     async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild = interaction.guild
-        user = interaction.user
+        try:
+            await interaction.response.defer(ephemeral=True)
 
-        category = guild.get_channel(CATEGORY_ID)
+            guild = interaction.guild
+            user = interaction.user
 
-        if category is None:
-            await interaction.response.send_message("❌ Ticket category not found!", ephemeral=True)
-            return
+            if guild is None:
+                await interaction.followup.send("❌ This only works inside a server.", ephemeral=True)
+                return
 
-        staff_role = guild.get_role(STAFF_ROLE_ID)
+            category = guild.get_channel(CATEGORY_ID)
+            if category is None:
+                await interaction.followup.send(
+                    f"❌ Ticket category not found.\nCheck CATEGORY_ID: `{CATEGORY_ID}`",
+                    ephemeral=True
+                )
+                return
 
-        if staff_role is None:
-            await interaction.response.send_message("❌ Staff role not found!", ephemeral=True)
-            return
+            staff_role = guild.get_role(STAFF_ROLE_ID)
+            if staff_role is None:
+                await interaction.followup.send(
+                    f"❌ Staff role not found.\nCheck STAFF_ROLE_ID: `{STAFF_ROLE_ID}`",
+                    ephemeral=True
+                )
+                return
 
-        # Stop users making duplicate open tickets
-        existing_channel = discord.utils.get(
-            guild.text_channels,
-            name=f"ticket-{user.name}".lower()
-        )
+            safe_name = clean_channel_name(user.name)
+            channel_name = f"ticket-{safe_name}"
 
-        if existing_channel is not None:
-            await interaction.response.send_message(
-                f"❌ You already have an open ticket: {existing_channel.mention}",
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                user: discord.PermissionOverwrite(
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True
+                ),
+                staff_role: discord.PermissionOverwrite(
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True
+                ),
+                guild.me: discord.PermissionOverwrite(
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True,
+                    manage_channels=True
+                )
+            }
+
+            channel = await guild.create_text_channel(
+                name=channel_name,
+                category=category,
+                overwrites=overwrites,
+                reason=f"Ticket created by {user}"
+            )
+
+            embed = discord.Embed(
+                title="🎟️ Ticket Created",
+                description=(
+                    f"{user.mention} welcome to your ticket!\n\n"
+                    "Staff will help you soon."
+                ),
+                color=discord.Color.green()
+            )
+
+            # IMPORTANT: this content includes "welcome to your ticket"
+            # so Sloty can detect it and give coins when closed.
+            await channel.send(
+                content=f"{user.mention} welcome to your ticket!",
+                embed=embed,
+                view=CloseButton()
+            )
+
+            await interaction.followup.send(
+                f"✅ Created {channel.mention}",
                 ephemeral=True
             )
-            return
 
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            user: discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True
-            ),
-            staff_role: discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True
-            ),
-            guild.me: discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True,
-                manage_channels=True
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "❌ Yapper does not have permission to create ticket channels.\n"
+                "Give Yapper **Manage Channels**, **View Channels**, and **Send Messages**.",
+                ephemeral=True
             )
-        }
+            print("Ticket create error: Forbidden permissions")
 
-        channel = await guild.create_text_channel(
-            name=f"ticket-{user.name}",
-            category=category,
-            overwrites=overwrites
-        )
-
-        embed = discord.Embed(
-            title="🎟️ Ticket Created",
-            description=f"{user.mention} welcome to your ticket!\n\nStaff will help you soon.",
-            color=discord.Color.green()
-        )
-
-        await channel.send(
-            content=f"{user.mention}",
-            embed=embed,
-            view=CloseButton()
-        )
-
-        await interaction.response.send_message(
-            f"✅ Created {channel.mention}",
-            ephemeral=True
-        )
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ Ticket failed.\nError: `{e}`",
+                ephemeral=True
+            )
+            print(f"Ticket create error: {e}")
 
 
 # ---------------- READY ----------------
@@ -135,6 +169,12 @@ async def ticket(ctx):
     await ctx.send(embed=embed, view=TicketButton())
 
 
+# ---------------- TEST COMMAND ----------------
+@bot.command()
+async def ping(ctx):
+    await ctx.send("🏓 Yapper is alive!")
+
+
 # ---------------- ERROR HANDLING ----------------
 @bot.event
 async def on_command_error(ctx, error):
@@ -155,4 +195,4 @@ token = os.getenv("TOKEN")
 if token is None:
     print("❌ TOKEN not found. Add TOKEN in Railway Variables.")
 else:
-    bot.run(token)
+    bot.run(token)run(token)
