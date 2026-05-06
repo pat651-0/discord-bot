@@ -13,8 +13,6 @@ GAME_CORNER_CATEGORY_ID = 1500809187595259984
 COINS_FILE = "coins.json"
 TICKETS_FILE = "tickets.json"
 
-# Optional: put your staff role ID here if you want staff to see Sloty win tickets.
-# Example: STAFF_ROLE_ID = 123456789012345678
 STAFF_ROLE_ID = None
 
 # ---------------- INTENTS ----------------
@@ -24,7 +22,6 @@ intents.guilds = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-
 # ---------------- JSON STORAGE ----------------
 def load_json(file_name):
     try:
@@ -33,28 +30,23 @@ def load_json(file_name):
     except:
         return {}
 
-
 def save_json(file_name, data):
     with open(file_name, "w") as file:
         json.dump(data, file, indent=4)
 
-
 coins = load_json(COINS_FILE)
 tickets = load_json(TICKETS_FILE)
-
 
 def add_coin(user_id, amount=1):
     user_id = str(user_id)
     coins[user_id] = coins.get(user_id, 0) + amount
     save_json(COINS_FILE, coins)
 
-
 def clean_channel_name(name):
     name = name.lower()
     name = re.sub(r"[^a-z0-9-]", "-", name)
     name = re.sub(r"-+", "-", name)
     return name[:40].strip("-")
-
 
 # ---------------- CLOSE WIN TICKET BUTTON ----------------
 class CloseWinTicketView(discord.ui.View):
@@ -69,7 +61,6 @@ class CloseWinTicketView(discord.ui.View):
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("Closing win ticket...", ephemeral=True)
         await interaction.channel.delete()
-
 
 # ---------------- CREATE SLOTY WIN TICKET ----------------
 async def create_win_ticket(interaction, result_name, result_emoji):
@@ -136,7 +127,6 @@ async def create_win_ticket(interaction, result_name, result_emoji):
     )
 
     return channel
-
 
 # ---------------- SLOT MACHINE BUTTON ----------------
 class SlotMachineView(discord.ui.View):
@@ -221,7 +211,6 @@ class SlotMachineView(discord.ui.View):
 
         await interaction.followup.send(embed=embed)
 
-
 # ---------------- READY ----------------
 @bot.event
 async def on_ready():
@@ -232,12 +221,10 @@ async def on_ready():
     print(f"🎰 Sloty logged in as {bot.user}")
     print("----------------------------")
 
-
 # ---------------- WATCH YAPPER TICKETS ----------------
 @bot.event
 async def on_message(message):
     if message.author.bot:
-        # Detect Yapper's ticket welcome message
         if "welcome to your ticket" in message.content.lower():
             if len(message.mentions) > 0:
                 user = message.mentions[0]
@@ -250,7 +237,6 @@ async def on_message(message):
         return
 
     await bot.process_commands(message)
-
 
 @bot.event
 async def on_guild_channel_delete(channel):
@@ -265,7 +251,6 @@ async def on_guild_channel_delete(channel):
         save_json(TICKETS_FILE, tickets)
 
         print(f"Yapper ticket closed. Added 1 coin to user ID {user_id}")
-
 
 # ---------------- PANEL COMMAND ----------------
 @bot.command()
@@ -289,13 +274,26 @@ async def slotpanel(ctx):
 
     await ctx.send(embed=embed, view=SlotMachineView())
 
-
 # ---------------- BALANCE ----------------
 @bot.command(aliases=["bal"])
 async def balance(ctx):
     user_id = str(ctx.author.id)
     await ctx.send(f"💰 {ctx.author.mention}, you have **{coins.get(user_id, 0)}** coins.")
 
+# ---------------- ADMIN ADD COINS TO YOURSELF ----------------
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def addcoins(ctx, amount: int):
+    if amount <= 0:
+        await ctx.send("❌ Amount must be bigger than 0.")
+        return
+
+    add_coin(ctx.author.id, amount)
+
+    await ctx.send(
+        f"✅ Added **{amount}** coins to {ctx.author.mention}.\n"
+        f"You now have **{coins[str(ctx.author.id)]}** coins."
+    )
 
 # ---------------- ADMIN GIVE COINS ----------------
 @bot.command()
@@ -311,7 +309,6 @@ async def givecoins(ctx, member: discord.Member, amount: int):
         f"✅ Gave **{amount}** coins to {member.mention}.\n"
         f"They now have **{coins[str(member.id)]}** coins."
     )
-
 
 # ---------------- ADMIN REMOVE COINS ----------------
 @bot.command()
@@ -330,7 +327,6 @@ async def removecoins(ctx, member: discord.Member, amount: int):
         f"They now have **{coins[user_id]}** coins."
     )
 
-
 # ---------------- HELP ----------------
 @bot.command()
 async def slothelp(ctx):
@@ -342,11 +338,11 @@ async def slothelp(ctx):
 
     embed.add_field(name="!slotpanel", value="Admin only: sends the slot machine panel.", inline=False)
     embed.add_field(name="!balance / !bal", value="Check your coins.", inline=False)
+    embed.add_field(name="!addcoins amount", value="Admin only: add coins to yourself.", inline=False)
     embed.add_field(name="!givecoins @user amount", value="Admin only: give coins.", inline=False)
     embed.add_field(name="!removecoins @user amount", value="Admin only: remove coins.", inline=False)
 
     await ctx.send(embed=embed)
-
 
 # ---------------- ERROR HANDLING ----------------
 @bot.event
@@ -368,7 +364,6 @@ async def on_command_error(ctx, error):
 
     print(error)
     await ctx.send("❌ Something went wrong. Check Railway logs.")
-
 
 # ---------------- RUN ----------------
 token = os.getenv(TOKEN_NAME)
