@@ -1,91 +1,150 @@
 import discord
 from discord.ext import commands
-import random
 import os
+import random
+import json
+import traceback
 
+# ---------------- INTENTS ----------------
 intents = discord.Intents.default()
-intents.message_content = True  # IMPORTANT
+intents.message_content = True
 
-bot = commands.Bot(command_prefix="?", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-# 🪙 Coin system (simple)
-coins = {}
+# ---------------- COINS STORAGE ----------------
+COINS_FILE = "coins.json"
 
-def get_coins(user_id):
-    return coins.get(user_id, 0)
+def load_coins():
+    try:
+        with open(COINS_FILE, "r") as file:
+            return json.load(file)
+    except:
+        return {}
 
-def add_coin(user_id):
-    coins[user_id] = get_coins(user_id) + 1
+def save_coins():
+    with open(COINS_FILE, "w") as file:
+        json.dump(coins, file, indent=4)
 
-def remove_coin(user_id):
-    if get_coins(user_id) > 0:
-        coins[user_id] -= 1
+coins = load_coins()
 
-
-# 🔥 READY EVENT
+# ---------------- READY ----------------
 @bot.event
 async def on_ready():
-    print(f"🎰 Slot bot ready as {bot.user}")
+    print("----------------------------")
+    print(f"🎰 Sloty logged in as {bot.user}")
+    print("----------------------------")
 
-
-# 🔍 DEBUG (important)
+# ---------------- DEBUG MESSAGE CHECK ----------------
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
 
-    print(f"Got message: {message.content}")
+    print(f"Got message in #{message.channel}: {message.content}")
+
+    # This proves Sloty can send messages
+    if message.content.lower() == "!ping":
+        try:
+            await message.channel.send("🏓 Sloty can send messages!")
+            print("Sent ping reply successfully.")
+        except Exception as e:
+            print("FAILED TO SEND MESSAGE:")
+            print(e)
+            traceback.print_exc()
+
     await bot.process_commands(message)
 
+# ---------------- BALANCE ----------------
+@bot.command(aliases=["bal"])
+async def balance(ctx):
+    user_id = str(ctx.author.id)
+    await ctx.send(f"💰 {ctx.author.mention}, you have **{coins.get(user_id, 0)}** coins.")
 
-# 🎰 SLOT BUTTON
-class SlotView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="🎰 Spin (1 coin)", style=discord.ButtonStyle.green)
-    async def spin(self, interaction: discord.Interaction, button: discord.ui.Button):
-
-        user_id = interaction.user.id
-
-        if get_coins(user_id) <= 0:
-            await interaction.response.send_message("❌ You have no coins!", ephemeral=True)
-            return
-
-        remove_coin(user_id)
-
-        roll = random.randint(1, 100)
-
-        if roll <= 50:
-            result = "🎰 ❌ ❌ ❌\n❌ Nothing"
-        elif roll <= 80:
-            result = "🎰 🍒 🍒 🍒\n🙂 Normal"
-        elif roll <= 95:
-            result = "🎰 🔥 🔥 🔥\n🔥 Hard Trade"
-        else:
-            result = "🎰 💎 💎 💎\n💎 VERY HARD TRADE!"
-
-        await interaction.response.send_message(result)
-
-
-# 🎰 SHOW SLOT MACHINE
-@bot.command()
-async def slot(ctx):
-    await ctx.send("🎰 Slot Machine", view=SlotView())
-
-
-# 🪙 GIVE COIN (test)
+# ---------------- ADD COIN ----------------
 @bot.command()
 async def addcoin(ctx):
-    add_coin(ctx.author.id)
-    await ctx.send("🪙 +1 coin")
+    user_id = str(ctx.author.id)
 
+    coins[user_id] = coins.get(user_id, 0) + 1
+    save_coins()
 
-# 💰 CHECK COINS
+    await ctx.send(f"💰 {ctx.author.mention}, you now have **{coins[user_id]}** coins.")
+
+# ---------------- SLOTS ----------------
 @bot.command()
-async def coins(ctx):
-    await ctx.send(f"🪙 You have {get_coins(ctx.author.id)} coins")
+async def slots(ctx, bet: int = 1):
+    user_id = str(ctx.author.id)
 
+    if bet <= 0:
+        await ctx.send("❌ Bet must be bigger than 0.")
+        return
 
-# 🚀 RUN BOT
-bot.run(os.getenv("TOKEN2"))
+    if coins.get(user_id, 0) < bet:
+        await ctx.send("❌ You do not have enough coins. Use `!addcoin`.")
+        return
+
+    coins[user_id] -= bet
+
+    symbols = ["🍒", "🍋", "🍇", "🔔", "💎", "7️⃣"]
+
+    slot1 = random.choice(symbols)
+    slot2 = random.choice(symbols)
+    slot3 = random.choice(symbols)
+
+    result = f"🎰 | {slot1} | {slot2} | {slot3} | 🎰"
+
+    if slot1 == "7️⃣" and slot2 == "7️⃣" and slot3 == "7️⃣":
+        winnings = bet * 10
+        coins[user_id] += winnings
+        msg = f"{result}\n\n💎 **JACKPOT!** You won **{winnings}** coins!"
+    elif slot1 == slot2 == slot3:
+        winnings = bet * 5
+        coins[user_id] += winnings
+        msg = f"{result}\n\n🔥 **BIG WIN!** You won **{winnings}** coins!"
+    elif slot1 == slot2 or slot2 == slot3 or slot1 == slot3:
+        winnings = bet * 2
+        coins[user_id] += winnings
+        msg = f"{result}\n\n🍒 **Small win!** You won **{winnings}** coins!"
+    else:
+        msg = f"{result}\n\n❌ You lost **{bet}** coin."
+
+    save_coins()
+
+    await ctx.send(f"{ctx.author.mention}\n{msg}\n\n💰 Balance: **{coins[user_id]}** coins")
+
+# ---------------- HELP ----------------
+@bot.command()
+async def slothelp(ctx):
+    embed = discord.Embed(
+        title="🎰 Sloty Commands",
+        description="Use these commands:",
+        color=discord.Color.gold()
+    )
+
+    embed.add_field(name="!ping", value="Check if Sloty can reply.", inline=False)
+    embed.add_field(name="!addcoin", value="Get 1 coin.", inline=False)
+    embed.add_field(name="!balance / !bal", value="Check your balance.", inline=False)
+    embed.add_field(name="!slots", value="Spin with 1 coin.", inline=False)
+    embed.add_field(name="!slots 5", value="Spin with 5 coins.", inline=False)
+
+    await ctx.send(embed=embed)
+
+# ---------------- ERRORS ----------------
+@bot.event
+async def on_command_error(ctx, error):
+    print(f"Command error: {error}")
+
+    if isinstance(error, commands.CommandNotFound):
+        return
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send("❌ Bad input. Try `!slothelp`.")
+    else:
+        await ctx.send("❌ Something went wrong. Check Railway logs.")
+
+# ---------------- RUN ----------------
+token = os.getenv("TOKEN")
+
+if token is None:
+    print("❌ TOKEN not found. Add TOKEN in Railway Variables.")
+else:
+    bot.run(token)
