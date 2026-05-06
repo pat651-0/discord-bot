@@ -12,7 +12,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ---------------- SETTINGS ----------------
 STAFF_ROLE_ID = 1470379426297548957
-CATEGORY_ID = 1472896391717195807
+CATEGORY_ID = 1472860643475329096
 
 
 def clean_channel_name(name):
@@ -62,6 +62,7 @@ class TicketButton(discord.ui.View):
                 return
 
             category = guild.get_channel(CATEGORY_ID)
+
             if category is None:
                 await interaction.followup.send(
                     f"❌ Ticket category not found.\nCheck CATEGORY_ID: `{CATEGORY_ID}`",
@@ -69,7 +70,15 @@ class TicketButton(discord.ui.View):
                 )
                 return
 
+            if not isinstance(category, discord.CategoryChannel):
+                await interaction.followup.send(
+                    f"❌ CATEGORY_ID is not a category.\nCurrent ID: `{CATEGORY_ID}`",
+                    ephemeral=True
+                )
+                return
+
             staff_role = guild.get_role(STAFF_ROLE_ID)
+
             if staff_role is None:
                 await interaction.followup.send(
                     f"❌ Staff role not found.\nCheck STAFF_ROLE_ID: `{STAFF_ROLE_ID}`",
@@ -116,8 +125,7 @@ class TicketButton(discord.ui.View):
                 color=discord.Color.green()
             )
 
-            # IMPORTANT: this content includes "welcome to your ticket"
-            # so Sloty can detect it and give coins when closed.
+            # Important: Sloty looks for "welcome to your ticket"
             await channel.send(
                 content=f"{user.mention} welcome to your ticket!",
                 embed=embed,
