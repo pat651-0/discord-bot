@@ -154,33 +154,36 @@ class SlotMachineView(discord.ui.View):
         coins[user_id] -= 1
 
         roll = random.randint(1, 100)
-
         ticket_channel = None
 
-        if roll <= 50:
+        # 1 - 70 = Nothing, 70%
+        if roll <= 70:
             result = "Nothing"
             emoji = "🚫"
-            description = "Unlucky! You got nothing this spin."
+            description = "maybe next time"
             color = discord.Color.red()
 
-        elif roll <= 85:
+        # 71 - 94 = Normal Cars, 24%
+        elif roll <= 94:
             result = "Normal Cars"
             emoji = "🚘"
-            description = "Nice! You landed on **Normal Cars**."
+            description = "not bad"
             color = discord.Color.blue()
             ticket_channel = await create_win_ticket(interaction, result, emoji)
 
-        elif roll <= 95:
+        # 95 - 99 = Hard Trade, 5%
+        elif roll <= 99:
             result = "Hard Trade"
             emoji = "✨"
-            description = "Ooooh, you hit a **Hard Trade**."
+            description = "nice"
             color = discord.Color.gold()
             ticket_channel = await create_win_ticket(interaction, result, emoji)
 
+        # 100 = Very Hard Trade, 1%
         else:
             result = "Very Hard Trade"
             emoji = "💎"
-            description = "JACKPOT! You hit a **Very Hard Trade**."
+            description = "🎰🎰💎🔥"
             color = discord.Color.purple()
             ticket_channel = await create_win_ticket(interaction, result, emoji)
 
@@ -205,7 +208,7 @@ class SlotMachineView(discord.ui.View):
         elif result != "Nothing":
             embed.add_field(
                 name="Win Ticket",
-                value="❌ Could not create ticket. Check Sloty's category permissions.",
+                value="❌ Could not create ticket. Check Sloty's Game Corner permissions.",
                 inline=False
             )
 
@@ -261,10 +264,10 @@ async def slotpanel(ctx):
         description=(
             "Click the button below to spin.\n\n"
             "**Chances:**\n"
-            "🚫 Nothing — **50%**\n"
-            "🚘 Normal Cars — **35%**\n"
-            "✨ Hard Trade — **10%**\n"
-            "💎 Very Hard Trade — **5%**\n\n"
+            "🚫 Nothing — **70%**\n"
+            "🚘 Normal Cars — **24%**\n"
+            "✨ Hard Trade — **5%**\n"
+            "💎 Very Hard Trade — **1%**\n\n"
             "Each spin costs **1 coin**.\n"
             "You earn **1 coin** when your Yapper ticket is closed.\n\n"
             "Winning anything except **Nothing** automatically opens a win ticket."
