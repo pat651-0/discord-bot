@@ -3,259 +3,205 @@ from discord.ext import commands
 import os
 import random
 import json
-import re
+import time
 
 # ---------------- SETTINGS ----------------
 TOKEN_NAME = "TOKEN2"
 
-GAME_CORNER_CATEGORY_ID = 1500809187595259984
-
 COINS_FILE = "coins.json"
 TICKETS_FILE = "tickets.json"
 
-STAFF_ROLE_ID = None
+GAME_CORNER_CATEGORY_ID = 1500809187595259984
+COIN_LIFETIME = 60 * 60  # 1 hour
 
 # ---------------- INTENTS ----------------
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
+intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ---------------- JSON STORAGE ----------------
-def load_json(file_name):
+# ---------------- FILE HELPERS ----------------
+def load_json(file, default):
+    if not os.path.exists(file):
+        return default
+
     try:
-        with open(file_name, "r") as file:
-            return json.load(file)
+        with open(file, "r") as f:
+            return json.load(f)
     except:
-        return {}
+        return default
 
-def save_json(file_name, data):
-    with open(file_name, "w") as file:
-        json.dump(data, file, indent=4)
+def save_json(file, data):
+    with open(file, "w") as f:
+        json.dump(data, f, indent=4)
 
-coins = load_json(COINS_FILE)
-tickets = load_json(TICKETS_FILE)
+coins = load_json(COINS_FILE, {})
+tickets = load_json(TICKETS_FILE, {})
 
-def add_coin(user_id, amount=1):
-    user_id = str(user_id)
-    coins[user_id] = coins.get(user_id, 0) + amount
+def save_coins():
     save_json(COINS_FILE, coins)
 
-def clean_channel_name(name):
-    name = name.lower()
-    name = re.sub(r"[^a-z0-9-]", "-", name)
-    name = re.sub(r"-+", "-", name)
-    return name[:40].strip("-")
+def save_tickets():
+    save_json(TICKETS_FILE, tickets)
 
-# ---------------- CLOSE WIN TICKET BUTTON ----------------
-class CloseWinTicketView(discord.ui.View):
+# ---------------- COINS WITH 1 HOUR TIMER ----------------
+def fix_old_coin_format(user_id):
+    uid = str(user_id)
+
+    if uid not in coins:
+        coins[uid] = []
+
+    # old format was number like 5
+    if isinstance(coins[uid], int):
+        old_amount = coins[uid]
+        coins[uid] = []
+        expiry = time.time() + COIN_LIFETIME
+
+        for _ in range(old_amount):
+            coins[uid].append(expiry)
+
+        save_coins()
+
+def clean_coins(user_id):
+    uid = str(user_id)
+    fix_old_coin_format(user_id)
+
+    now = time.time()
+    coins[uid] = [expiry for expiry in coins[uid] if expiry > now]
+    save_coins()
+
+def get_coins(user_id):
+    clean_coins(user_id)
+    return len(coins.get(str(user_id), []))
+
+def add_coins(user_id, amount):
+    uid = str(user_id)
+    fix_old_coin_format(user_id)
+
+    expiry_time = time.time() + COIN_LIFETIME
+
+    for _ in range(amount):
+        coins[uid].append(expiry_time)
+
+    save_coins()
+
+def remove_coins(user_id, amount):
+    uid = str(user_id)
+    clean_coins(user_id)
+
+    if len(coins[uid]) < amount:
+        return False
+
+    coins[uid] = coins[uid][amount:]
+    save_coins()
+    return True
+
+# ---------------- SLOT BUTTON ----------------
+class SlotView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(
-        label="Close Win Ticket",
-        style=discord.ButtonStyle.red,
-        custom_id="sloty_close_win_ticket"
-    )
-    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("Closing win ticket...", ephemeral=True)
-        await interaction.channel.delete()
+    @discord.ui.button(label="🎰 Spin Slot Machine", style=discord.ButtonStyle.green, custom_id="spin_slot")
+    async def spin_slot(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user = interaction.user
 
-# ---------------- CREATE SLOTY WIN TICKET ----------------
-async def create_win_ticket(interaction, result_name, result_emoji):
-    guild = interaction.guild
-    user = interaction.user
-
-    category = guild.get_channel(GAME_CORNER_CATEGORY_ID)
-
-    if category is None:
-        return None
-
-    bot_member = guild.me
-
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=False),
-        user: discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=True,
-            read_message_history=True
-        ),
-        bot_member: discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=True,
-            read_message_history=True,
-            manage_channels=True
-        )
-    }
-
-    if STAFF_ROLE_ID is not None:
-        staff_role = guild.get_role(STAFF_ROLE_ID)
-        if staff_role is not None:
-            overwrites[staff_role] = discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True
-            )
-
-    safe_name = clean_channel_name(user.name)
-    channel_name = f"slot-win-{safe_name}"
-
-    channel = await guild.create_text_channel(
-        name=channel_name,
-        category=category,
-        overwrites=overwrites,
-        reason="Sloty win ticket created"
-    )
-
-    embed = discord.Embed(
-        title=f"{result_emoji} Sloty Win Ticket",
-        description=(
-            f"{user.mention} won **{result_name}**!\n\n"
-            "Staff can use this ticket to sort the trade/prize."
-        ),
-        color=discord.Color.green()
-    )
-
-    embed.add_field(name="Winner", value=user.mention, inline=False)
-    embed.add_field(name="Prize", value=f"{result_emoji} {result_name}", inline=False)
-
-    await channel.send(
-        content=f"{user.mention}",
-        embed=embed,
-        view=CloseWinTicketView()
-    )
-
-    return channel
-
-# ---------------- SLOT MACHINE BUTTON ----------------
-class SlotMachineView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(
-        label="🎰 Spin Slot Machine",
-        style=discord.ButtonStyle.green,
-        custom_id="sloty_spin_button"
-    )
-    async def spin(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user_id = str(interaction.user.id)
-        balance = coins.get(user_id, 0)
-
-        if balance <= 0:
+        if get_coins(user.id) < 1:
             await interaction.response.send_message(
-                "❌ You have no coins!\nClose a Yapper ticket to earn **+1 coin**.",
+                "❌ You have no valid coins!\nCoins expire after **1 hour**.",
                 ephemeral=True
             )
             return
 
-        await interaction.response.defer()
-
-        coins[user_id] -= 1
+        remove_coins(user.id, 1)
 
         roll = random.randint(1, 100)
-        ticket_channel = None
 
-        # 1 - 70 = Nothing, 70%
         if roll <= 70:
-            result = "Nothing"
-            emoji = "🚫"
-            description = "maybe next time"
-            color = discord.Color.red()
-
-        # 71 - 94 = Normal Cars, 24%
+            result = "🚫 Nothing"
+            msg = "Maybe next time 😭"
+            won = False
         elif roll <= 94:
-            result = "Normal Cars"
-            emoji = "🚘"
-            description = "not bad"
-            color = discord.Color.blue()
-            ticket_channel = await create_win_ticket(interaction, result, emoji)
-
-        # 95 - 99 = Hard Trade, 5%
+            result = "🚘 Normal Cars"
+            msg = "Not bad."
+            won = True
         elif roll <= 99:
-            result = "Hard Trade"
-            emoji = "✨"
-            description = "nice"
-            color = discord.Color.gold()
-            ticket_channel = await create_win_ticket(interaction, result, emoji)
-
-        # 100 = Very Hard Trade, 1%
+            result = "✨ Hard Trade"
+            msg = "Nice."
+            won = True
         else:
-            result = "Very Hard Trade"
-            emoji = "💎"
-            description = "🎰🎰💎🔥"
-            color = discord.Color.purple()
-            ticket_channel = await create_win_ticket(interaction, result, emoji)
+            result = "💎 Very Hard Trade"
+            msg = "🎰🎰💎🔥"
+            won = True
 
-        save_json(COINS_FILE, coins)
+        balance = get_coins(user.id)
 
         embed = discord.Embed(
             title="🎰 Slot Machine Result",
-            description=description,
-            color=color
+            description=f"{msg}\n\nYou landed on **{result}**.",
+            color=discord.Color.blue()
         )
 
-        embed.add_field(name="Result", value=f"{emoji} {result}", inline=False)
+        embed.add_field(name="Result", value=result, inline=False)
         embed.add_field(name="Coin Cost", value="1 coin", inline=True)
-        embed.add_field(name="Balance", value=f"{coins[user_id]} coins", inline=True)
+        embed.add_field(name="Balance", value=f"{balance} coins", inline=True)
 
-        if ticket_channel is not None:
-            embed.add_field(
-                name="Win Ticket",
-                value=f"Created: {ticket_channel.mention}",
-                inline=False
-            )
-        elif result != "Nothing":
-            embed.add_field(
-                name="Win Ticket",
-                value="❌ Could not create ticket. Check Sloty's Game Corner permissions.",
-                inline=False
-            )
+        await interaction.response.send_message(embed=embed)
 
-        await interaction.followup.send(embed=embed)
+        if won:
+            await create_win_ticket(interaction, user, result)
 
-# ---------------- READY ----------------
-@bot.event
-async def on_ready():
-    bot.add_view(SlotMachineView())
-    bot.add_view(CloseWinTicketView())
+# ---------------- CREATE WIN TICKET ----------------
+async def create_win_ticket(interaction, user, result):
+    guild = interaction.guild
+    category = guild.get_channel(GAME_CORNER_CATEGORY_ID)
 
-    print("----------------------------")
-    print(f"🎰 Sloty logged in as {bot.user}")
-    print("----------------------------")
-
-# ---------------- WATCH YAPPER TICKETS ----------------
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        if "welcome to your ticket" in message.content.lower():
-            if len(message.mentions) > 0:
-                user = message.mentions[0]
-
-                tickets[str(message.channel.id)] = str(user.id)
-                save_json(TICKETS_FILE, tickets)
-
-                print(f"Saved Yapper ticket owner: #{message.channel} -> {user}")
-
+    if category is None:
+        await interaction.followup.send(
+            "❌ I won something but couldn't open a ticket because Game Corner category ID is wrong.",
+            ephemeral=True
+        )
         return
 
-    await bot.process_commands(message)
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+    }
 
-@bot.event
-async def on_guild_channel_delete(channel):
-    channel_id = str(channel.id)
+    channel_name = f"slot-win-{user.name}".lower().replace(" ", "-")
 
-    if channel_id in tickets:
-        user_id = tickets[channel_id]
+    ticket_channel = await guild.create_text_channel(
+        name=channel_name,
+        category=category,
+        overwrites=overwrites
+    )
 
-        add_coin(user_id, 1)
+    tickets[str(ticket_channel.id)] = {
+        "user_id": user.id,
+        "result": result
+    }
+    save_tickets()
 
-        del tickets[channel_id]
-        save_json(TICKETS_FILE, tickets)
+    embed = discord.Embed(
+        title="🎰 Slot Win Ticket",
+        description=(
+            f"{user.mention} won **{result}**!\n\n"
+            "Send a pic of what car you want 🚘\n"
+            "Staff will sort your prize here."
+        ),
+        color=discord.Color.gold()
+    )
 
-        print(f"Yapper ticket closed. Added 1 coin to user ID {user_id}")
+    await ticket_channel.send(content=user.mention, embed=embed)
 
-# ---------------- PANEL COMMAND ----------------
+    await interaction.followup.send(
+        f"✅ You won **{result}**! Ticket opened: {ticket_channel.mention}",
+        ephemeral=True
+    )
+
+# ---------------- COMMANDS ----------------
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def slotpanel(ctx):
@@ -265,104 +211,82 @@ async def slotpanel(ctx):
             "Click the button below to spin.\n\n"
             "**Chances:**\n"
             "🚫 Nothing — **70%**\n"
+            "Maybe next time 😭\n\n"
             "🚘 Normal Cars — **24%**\n"
+            "Not bad.\n\n"
             "✨ Hard Trade — **5%**\n"
-            "💎 Very Hard Trade — **1%**\n\n"
+            "Nice.\n\n"
+            "💎 Very Hard Trade — **1%**\n"
+            "🎰🎰💎🔥\n\n"
             "Each spin costs **1 coin**.\n"
-            "You earn **1 coin** when your Yapper ticket is closed.\n\n"
-            "Winning anything except **Nothing** automatically opens a win ticket."
+            "Coins expire after **1 hour**.\n"
+            "You earn **1 coin** when your Yapper ticket is closed."
         ),
         color=discord.Color.green()
     )
 
-    await ctx.send(embed=embed, view=SlotMachineView())
+    await ctx.send(embed=embed, view=SlotView())
 
-# ---------------- BALANCE ----------------
-@bot.command(aliases=["bal"])
-async def balance(ctx):
-    user_id = str(ctx.author.id)
-    await ctx.send(f"💰 {ctx.author.mention}, you have **{coins.get(user_id, 0)}** coins.")
-
-# ---------------- ADMIN ADD COINS TO YOURSELF ----------------
 @bot.command()
 @commands.has_permissions(administrator=True)
-async def addcoins(ctx, amount: int):
-    if amount <= 0:
-        await ctx.send("❌ Amount must be bigger than 0.")
-        return
+async def addcoins(ctx, member: discord.Member, amount: int):
+    add_coins(member.id, amount)
+    await ctx.send(f"✅ Added **{amount}** coin(s) to {member.mention}. Coins expire in **1 hour**.")
 
-    add_coin(ctx.author.id, amount)
-
-    await ctx.send(
-        f"✅ Added **{amount}** coins to {ctx.author.mention}.\n"
-        f"You now have **{coins[str(ctx.author.id)]}** coins."
-    )
-
-# ---------------- ADMIN GIVE COINS ----------------
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def givecoins(ctx, member: discord.Member, amount: int):
-    if amount <= 0:
-        await ctx.send("❌ Amount must be bigger than 0.")
-        return
-
-    add_coin(member.id, amount)
-
-    await ctx.send(
-        f"✅ Gave **{amount}** coins to {member.mention}.\n"
-        f"They now have **{coins[str(member.id)]}** coins."
-    )
-
-# ---------------- ADMIN REMOVE COINS ----------------
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def removecoins(ctx, member: discord.Member, amount: int):
-    if amount <= 0:
-        await ctx.send("❌ Amount must be bigger than 0.")
-        return
+    success = remove_coins(member.id, amount)
 
-    user_id = str(member.id)
-    coins[user_id] = max(coins.get(user_id, 0) - amount, 0)
-    save_json(COINS_FILE, coins)
+    if success:
+        await ctx.send(f"✅ Removed **{amount}** coin(s) from {member.mention}.")
+    else:
+        await ctx.send(f"❌ {member.mention} does not have enough coins.")
 
-    await ctx.send(
-        f"✅ Removed **{amount}** coins from {member.mention}.\n"
-        f"They now have **{coins[user_id]}** coins."
-    )
+@bot.command()
+async def coins(ctx, member: discord.Member = None):
+    member = member or ctx.author
+    balance = get_coins(member.id)
 
-# ---------------- HELP ----------------
+    await ctx.send(f"🪙 {member.mention} has **{balance}** valid coin(s).")
+
 @bot.command()
 async def slothelp(ctx):
-    embed = discord.Embed(
-        title="🎰 Sloty Commands",
-        description="Here are Sloty's commands:",
-        color=discord.Color.gold()
+    await ctx.send(
+        "**Sloty Commands**\n"
+        "`!slotpanel` — sends the slot machine panel\n"
+        "`!coins` — checks your coins\n"
+        "`!coins @user` — checks someone else's coins\n"
+        "`!addcoins @user amount` — admin only\n"
+        "`!removecoins @user amount` — admin only\n\n"
+        "Coins expire after **1 hour**."
     )
 
-    embed.add_field(name="!slotpanel", value="Admin only: sends the slot machine panel.", inline=False)
-    embed.add_field(name="!balance / !bal", value="Check your coins.", inline=False)
-    embed.add_field(name="!addcoins amount", value="Admin only: add coins to yourself.", inline=False)
-    embed.add_field(name="!givecoins @user amount", value="Admin only: give coins.", inline=False)
-    embed.add_field(name="!removecoins @user amount", value="Admin only: remove coins.", inline=False)
+# ---------------- READY ----------------
+@bot.event
+async def on_ready():
+    bot.add_view(SlotView())
 
-    await ctx.send(embed=embed)
+    print("----------------------------")
+    print(f"🎰 Sloty logged in as {bot.user}")
+    print("----------------------------")
 
-# ---------------- ERROR HANDLING ----------------
+# ---------------- ERRORS ----------------
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         return
 
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ You do not have permission to use that command.")
-        return
-
     if isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send("❌ Missing something. Try `!slothelp`.")
+        await ctx.send("❌ Bad input. Try `!slothelp`.")
         return
 
     if isinstance(error, commands.BadArgument):
         await ctx.send("❌ Bad input. Try `!slothelp`.")
+        return
+
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ You do not have permission to use that.")
         return
 
     print(error)
@@ -372,6 +296,7 @@ async def on_command_error(ctx, error):
 token = os.getenv(TOKEN_NAME)
 
 if token is None:
-    print(f"❌ {TOKEN_NAME} not found in Railway Variables.")
+    print(f"❌ {TOKEN_NAME} not found in Railway variables.")
 else:
+    bot.run(token)
     bot.run(token)
