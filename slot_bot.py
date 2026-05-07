@@ -4,15 +4,11 @@ import os
 import random
 import json
 
-# ---------------- SETTINGS ----------------
 TOKEN_NAME = "TOKEN2"
-
 COINS_FILE = "coins.json"
 TICKETS_FILE = "tickets.json"
-
 GAME_CORNER_CATEGORY_ID = 1500809187595259984
 
-# ---------------- INTENTS ----------------
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
@@ -20,11 +16,9 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ---------------- FILE HELPERS ----------------
 def load_json(file, default):
     if not os.path.exists(file):
         return default
-
     try:
         with open(file, "r") as f:
             return json.load(f)
@@ -44,48 +38,35 @@ def save_coins():
 def save_tickets():
     save_json(TICKETS_FILE, tickets)
 
-# ---------------- COINS ----------------
 def get_coins(user_id):
     uid = str(user_id)
-
     if uid not in coins:
         coins[uid] = 0
         save_coins()
-
     return coins[uid]
 
 def add_coins(user_id, amount):
     uid = str(user_id)
-
     if uid not in coins:
         coins[uid] = 0
-
     coins[uid] += amount
     save_coins()
 
 def remove_coins(user_id, amount):
     uid = str(user_id)
-
     if uid not in coins:
         coins[uid] = 0
-
     if coins[uid] < amount:
         return False
-
     coins[uid] -= amount
     save_coins()
     return True
 
-# ---------------- SLOT BUTTON ----------------
 class SlotView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(
-        label="🎰 Spin Slot Machine",
-        style=discord.ButtonStyle.green,
-        custom_id="spin_slot"
-    )
+    @discord.ui.button(label="🎰 Spin Slot Machine", style=discord.ButtonStyle.green, custom_id="spin_slot")
     async def spin_slot(self, interaction: discord.Interaction, button: discord.ui.Button):
         user = interaction.user
 
@@ -124,7 +105,6 @@ class SlotView(discord.ui.View):
             description=f"{msg}\n\nYou landed on **{result}**.",
             color=discord.Color.blue()
         )
-
         embed.add_field(name="Result", value=result, inline=False)
         embed.add_field(name="Coin Cost", value="1 coin", inline=True)
         embed.add_field(name="Balance", value=f"{balance} coins", inline=True)
@@ -134,7 +114,6 @@ class SlotView(discord.ui.View):
         if won:
             await create_win_ticket(interaction, user, result)
 
-# ---------------- CREATE WIN TICKET ----------------
 async def create_win_ticket(interaction, user, result):
     guild = interaction.guild
     category = guild.get_channel(GAME_CORNER_CATEGORY_ID)
@@ -148,16 +127,8 @@ async def create_win_ticket(interaction, user, result):
 
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
-        user: discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=True,
-            read_message_history=True
-        ),
-        guild.me: discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=True,
-            read_message_history=True
-        )
+        user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
     }
 
     channel_name = f"slot-win-{user.name}".lower().replace(" ", "-")
@@ -172,7 +143,6 @@ async def create_win_ticket(interaction, user, result):
         "user_id": user.id,
         "result": result
     }
-
     save_tickets()
 
     embed = discord.Embed(
@@ -192,7 +162,6 @@ async def create_win_ticket(interaction, user, result):
         ephemeral=True
     )
 
-# ---------------- COMMANDS ----------------
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def slotpanel(ctx):
@@ -214,7 +183,6 @@ async def slotpanel(ctx):
         ),
         color=discord.Color.green()
     )
-
     await ctx.send(embed=embed, view=SlotView())
 
 @bot.command()
@@ -227,7 +195,6 @@ async def addcoins(ctx, member: discord.Member, amount: int):
 @commands.has_permissions(administrator=True)
 async def removecoins(ctx, member: discord.Member, amount: int):
     success = remove_coins(member.id, amount)
-
     if success:
         await ctx.send(f"✅ Removed **{amount}** coin(s) from {member.mention}.")
     else:
@@ -237,7 +204,6 @@ async def removecoins(ctx, member: discord.Member, amount: int):
 async def coins(ctx, member: discord.Member = None):
     member = member or ctx.author
     balance = get_coins(member.id)
-
     await ctx.send(f"🪙 {member.mention} has **{balance}** coin(s).")
 
 @bot.command()
@@ -251,29 +217,23 @@ async def slothelp(ctx):
         "`!removecoins @user amount` — admin only"
     )
 
-# ---------------- READY ----------------
 @bot.event
 async def on_ready():
     bot.add_view(SlotView())
-
     print("----------------------------")
     print(f"🎰 Sloty logged in as {bot.user}")
     print("----------------------------")
 
-# ---------------- ERRORS ----------------
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         return
-
     if isinstance(error, commands.MissingRequiredArgument):
         await ctx.send("❌ Bad input. Try `!slothelp`.")
         return
-
     if isinstance(error, commands.BadArgument):
         await ctx.send("❌ Bad input. Try `!slothelp`.")
         return
-
     if isinstance(error, commands.MissingPermissions):
         await ctx.send("❌ You do not have permission to use that.")
         return
@@ -281,10 +241,9 @@ async def on_command_error(ctx, error):
     print(error)
     await ctx.send("❌ Something went wrong. Check Railway logs.")
 
-# ---------------- RUN ----------------
-token = os.getenv(TOKEN_NAME)
+token = os.getenv("TOKEN2")
 
 if token is None:
-    print(f"❌ {TOKEN_NAME} not found in Railway variables.")
+    print("❌ TOKEN2 not found in Railway variables.")
 else:
-    bot.run(TOKEN2)
+    bot.run(token)
