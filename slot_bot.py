@@ -287,4 +287,4 @@ token = os.getenv(TOKEN_NAME)
 if token is None:
     print(f"❌ {TOKEN_NAME} not found in Railway variables.")
 else:
-    bot.run(token)
+    bot.run(TOKEN2)
