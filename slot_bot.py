@@ -3,7 +3,6 @@ from discord.ext import commands
 import os
 import random
 import json
-import time
 
 # ---------------- SETTINGS ----------------
 TOKEN_NAME = "TOKEN2"
@@ -12,7 +11,6 @@ COINS_FILE = "coins.json"
 TICKETS_FILE = "tickets.json"
 
 GAME_CORNER_CATEGORY_ID = 1500809187595259984
-COIN_LIFETIME = 60 * 60  # 1 hour
 
 # ---------------- INTENTS ----------------
 intents = discord.Intents.default()
@@ -46,55 +44,35 @@ def save_coins():
 def save_tickets():
     save_json(TICKETS_FILE, tickets)
 
-# ---------------- COINS WITH 1 HOUR TIMER ----------------
-def fix_old_coin_format(user_id):
+# ---------------- COINS ----------------
+def get_coins(user_id):
     uid = str(user_id)
 
     if uid not in coins:
-        coins[uid] = []
-
-    # old format was number like 5
-    if isinstance(coins[uid], int):
-        old_amount = coins[uid]
-        coins[uid] = []
-        expiry = time.time() + COIN_LIFETIME
-
-        for _ in range(old_amount):
-            coins[uid].append(expiry)
-
+        coins[uid] = 0
         save_coins()
 
-def clean_coins(user_id):
-    uid = str(user_id)
-    fix_old_coin_format(user_id)
-
-    now = time.time()
-    coins[uid] = [expiry for expiry in coins[uid] if expiry > now]
-    save_coins()
-
-def get_coins(user_id):
-    clean_coins(user_id)
-    return len(coins.get(str(user_id), []))
+    return coins[uid]
 
 def add_coins(user_id, amount):
     uid = str(user_id)
-    fix_old_coin_format(user_id)
 
-    expiry_time = time.time() + COIN_LIFETIME
+    if uid not in coins:
+        coins[uid] = 0
 
-    for _ in range(amount):
-        coins[uid].append(expiry_time)
-
+    coins[uid] += amount
     save_coins()
 
 def remove_coins(user_id, amount):
     uid = str(user_id)
-    clean_coins(user_id)
 
-    if len(coins[uid]) < amount:
+    if uid not in coins:
+        coins[uid] = 0
+
+    if coins[uid] < amount:
         return False
 
-    coins[uid] = coins[uid][amount:]
+    coins[uid] -= amount
     save_coins()
     return True
 
@@ -103,13 +81,17 @@ class SlotView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="🎰 Spin Slot Machine", style=discord.ButtonStyle.green, custom_id="spin_slot")
+    @discord.ui.button(
+        label="🎰 Spin Slot Machine",
+        style=discord.ButtonStyle.green,
+        custom_id="spin_slot"
+    )
     async def spin_slot(self, interaction: discord.Interaction, button: discord.ui.Button):
         user = interaction.user
 
         if get_coins(user.id) < 1:
             await interaction.response.send_message(
-                "❌ You have no valid coins!\nCoins expire after **1 hour**.",
+                "❌ You have no coins!\nClose a Yapper ticket to earn **+1 coin**.",
                 ephemeral=True
             )
             return
@@ -166,8 +148,16 @@ async def create_win_ticket(interaction, user, result):
 
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
-        user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+        user: discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True
+        ),
+        guild.me: discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True
+        )
     }
 
     channel_name = f"slot-win-{user.name}".lower().replace(" ", "-")
@@ -182,6 +172,7 @@ async def create_win_ticket(interaction, user, result):
         "user_id": user.id,
         "result": result
     }
+
     save_tickets()
 
     embed = discord.Embed(
@@ -219,7 +210,6 @@ async def slotpanel(ctx):
             "💎 Very Hard Trade — **1%**\n"
             "🎰🎰💎🔥\n\n"
             "Each spin costs **1 coin**.\n"
-            "Coins expire after **1 hour**.\n"
             "You earn **1 coin** when your Yapper ticket is closed."
         ),
         color=discord.Color.green()
@@ -231,7 +221,7 @@ async def slotpanel(ctx):
 @commands.has_permissions(administrator=True)
 async def addcoins(ctx, member: discord.Member, amount: int):
     add_coins(member.id, amount)
-    await ctx.send(f"✅ Added **{amount}** coin(s) to {member.mention}. Coins expire in **1 hour**.")
+    await ctx.send(f"✅ Added **{amount}** coin(s) to {member.mention}.")
 
 @bot.command()
 @commands.has_permissions(administrator=True)
@@ -248,7 +238,7 @@ async def coins(ctx, member: discord.Member = None):
     member = member or ctx.author
     balance = get_coins(member.id)
 
-    await ctx.send(f"🪙 {member.mention} has **{balance}** valid coin(s).")
+    await ctx.send(f"🪙 {member.mention} has **{balance}** coin(s).")
 
 @bot.command()
 async def slothelp(ctx):
@@ -258,8 +248,7 @@ async def slothelp(ctx):
         "`!coins` — checks your coins\n"
         "`!coins @user` — checks someone else's coins\n"
         "`!addcoins @user amount` — admin only\n"
-        "`!removecoins @user amount` — admin only\n\n"
-        "Coins expire after **1 hour**."
+        "`!removecoins @user amount` — admin only"
     )
 
 # ---------------- READY ----------------
@@ -298,5 +287,4 @@ token = os.getenv(TOKEN_NAME)
 if token is None:
     print(f"❌ {TOKEN_NAME} not found in Railway variables.")
 else:
-    bot.run(token)
     bot.run(token)
