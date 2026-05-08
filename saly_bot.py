@@ -11,13 +11,6 @@ BOT_COLOR = 0x8E7CC3
 ERROR_COLOR = 0xE74C3C
 SUCCESS_COLOR = 0x57F287
 
-SAFE_MENTIONS = discord.AllowedMentions(
-    everyone=False,
-    users=True,
-    roles=False,
-    replied_user=False
-)
-
 # ---------------- INTENTS ----------------
 intents = discord.Intents.default()
 intents.guilds = True
@@ -33,7 +26,7 @@ bot.remove_command("help")
 
 
 # ---------------- HELPERS ----------------
-async def safe_delete(ctx):
+async def delete_command(ctx):
     try:
         await ctx.message.delete()
     except Exception:
@@ -47,7 +40,6 @@ def make_embed(title, description, color=BOT_COLOR):
         color=color,
         timestamp=datetime.now(timezone.utc)
     )
-
     embed.set_footer(text="Saly • clean server info")
     return embed
 
@@ -55,15 +47,8 @@ def make_embed(title, description, color=BOT_COLOR):
 def parse_title_body(text, default_title="📌 Info"):
     if "|" in text:
         title, body = text.split("|", 1)
-        title = title.strip()
-        body = body.strip()
-
-        if not title:
-            title = default_title
-
-        if not body:
-            body = "No information provided."
-
+        title = title.strip() or default_title
+        body = body.strip() or "No information provided."
         return title, body
 
     return default_title, text.strip()
@@ -73,7 +58,6 @@ def clean_sentence(text):
     text = text.strip()
     if not text:
         return ""
-
     return text[0].upper() + text[1:]
 
 
@@ -83,7 +67,6 @@ def smart_clean_text(raw_text):
 
     lower = text.lower()
 
-    # Vehicle / car info auto-cleaner
     if (
         "clean colour" in lower
         or "rim colour" in lower
@@ -103,11 +86,10 @@ def smart_clean_text(raw_text):
             "• Accent colour\n\n"
             "If something is scratched, let me know and I’ll replace it with no problem.\n\n"
             "**Note:** tyre smoke and horns are not checked.\n\n"
-            "🎟️ To trade, please create a ticket in the tickets channel."
+            "🎟️ To trade, please create a ticket."
         )
         return title, body
 
-    # Heist payment info auto-cleaner
     if "heist" in lower or "heists" in lower:
         title = "💰 Heist Payment Availability"
         body = (
@@ -118,7 +100,6 @@ def smart_clean_text(raw_text):
         )
         return title, body
 
-    # Generic cleaner
     lines = [line.strip(" -•") for line in text.splitlines() if line.strip()]
 
     if len(lines) > 1:
@@ -149,15 +130,11 @@ async def on_ready():
 @commands.has_permissions(administrator=True)
 async def sallyspeak(ctx, *, message: str = None):
     if message is None:
-        await ctx.send("❌ Usage: `!Sallyspeak your message here`")
+        await ctx.send("❌ Usage: `!sallyspeak your message here`")
         return
 
-    await safe_delete(ctx)
-
-    await ctx.send(
-        message,
-        allowed_mentions=SAFE_MENTIONS
-    )
+    await ctx.send(message)
+    await delete_command(ctx)
 
 
 # ---------------- CLEAN YAP COMMAND ----------------
@@ -168,12 +145,11 @@ async def clean(ctx, *, message: str = None):
         await ctx.send("❌ Usage: `!clean your messy message here`")
         return
 
-    await safe_delete(ctx)
-
     title, body = smart_clean_text(message)
-
     embed = make_embed(title, body)
+
     await ctx.send(embed=embed)
+    await delete_command(ctx)
 
 
 # ---------------- CUSTOM EMBED ----------------
@@ -181,18 +157,14 @@ async def clean(ctx, *, message: str = None):
 @commands.has_permissions(administrator=True)
 async def custom_embed(ctx, *, text: str = None):
     if text is None:
-        await ctx.send(
-            "❌ Usage:\n"
-            "`!embed Title | Message here`"
-        )
+        await ctx.send("❌ Usage: `!embed Title | Message here`")
         return
-
-    await safe_delete(ctx)
 
     title, body = parse_title_body(text, default_title="📌 Info")
     embed = make_embed(title, body)
 
     await ctx.send(embed=embed)
+    await delete_command(ctx)
 
 
 # ---------------- ANNOUNCE TO CHANNEL ----------------
@@ -200,16 +172,13 @@ async def custom_embed(ctx, *, text: str = None):
 @commands.has_permissions(administrator=True)
 async def announce(ctx, channel: discord.TextChannel = None, *, message: str = None):
     if channel is None or message is None:
-        await ctx.send(
-            "❌ Usage:\n"
-            "`!announce #channel message here`"
-        )
+        await ctx.send("❌ Usage: `!announce #channel message here`")
         return
 
-    await safe_delete(ctx)
-
     embed = make_embed("📢 Announcement", message)
-    await channel.send(embed=embed, allowed_mentions=SAFE_MENTIONS)
+
+    await channel.send(embed=embed)
+    await delete_command(ctx)
 
     try:
         await ctx.send(f"✅ Announcement sent to {channel.mention}", delete_after=5)
@@ -221,8 +190,6 @@ async def announce(ctx, channel: discord.TextChannel = None, *, message: str = N
 @bot.command(name="rules")
 @commands.has_permissions(administrator=True)
 async def rules(ctx):
-    await safe_delete(ctx)
-
     description = (
         "Please read and follow the server rules.\n\n"
         "**1.** No BS.\n"
@@ -239,14 +206,13 @@ async def rules(ctx):
 
     embed = make_embed("📜 Rules", description)
     await ctx.send(embed=embed)
+    await delete_command(ctx)
 
 
 # ---------------- CAR INFO PANEL ----------------
 @bot.command(name="carinfo", aliases=["cars", "vehicleinfo"])
 @commands.has_permissions(administrator=True)
 async def carinfo(ctx):
-    await safe_delete(ctx)
-
     description = (
         "All vehicles are clean unless stated otherwise.\n\n"
         "**This includes:**\n"
@@ -262,14 +228,13 @@ async def carinfo(ctx):
 
     embed = make_embed("🚗 Vehicle Condition Info", description)
     await ctx.send(embed=embed)
+    await delete_command(ctx)
 
 
 # ---------------- HEIST INFO PANEL ----------------
 @bot.command(name="heistinfo", aliases=["heists", "heist"])
 @commands.has_permissions(administrator=True)
 async def heistinfo(ctx):
-    await safe_delete(ctx)
-
     description = (
         "Heist payments are only available during these times:\n\n"
         "• **Tuesday:** 12 PM – 4 PM UK time\n"
@@ -279,6 +244,33 @@ async def heistinfo(ctx):
 
     embed = make_embed("💰 Heist Payment Availability", description)
     await ctx.send(embed=embed)
+    await delete_command(ctx)
+
+
+# ---------------- SLOT INFO PANEL ----------------
+@bot.command(name="slotinfo")
+@commands.has_permissions(administrator=True)
+async def slotinfo(ctx):
+    description = (
+        "Use your coins to spin the Sloty machine and try your luck 🍀\n\n"
+        "Each spin costs **1 coin**.\n\n"
+        "**Chances:**\n\n"
+        "🚫 **Nothing — 70%**\n"
+        "Maybe next time 🚫\n\n"
+        "🚘 **Normal Cars — 24%**\n"
+        "Not bad 🚘\n\n"
+        "✨ **Hard Trade — 5%**\n"
+        "Nice pull ✨\n\n"
+        "💎 **Very Hard Trade — 1%**\n"
+        "🎰🎰💎🔥\n\n"
+        "If you win anything except **Nothing**, Sloty will automatically open a win ticket under **Game Corner**.\n\n"
+        "In the ticket, send a pic of what car you want so I can sort your prize. 🚗📸\n\n"
+        "You’ll earn a coin when we finish the trade. 🎟️➡️🪙"
+    )
+
+    embed = make_embed("🎰 Slot Machine Info 🎰", description)
+    await ctx.send(embed=embed)
+    await delete_command(ctx)
 
 
 # ---------------- SALY HELP ----------------
@@ -288,8 +280,8 @@ async def salyhelp(ctx):
         "📝 Saly Commands",
         (
             "**Speech Commands**\n"
-            "`!Sallyspeak message` — Saly says your message.\n"
-            "`!say message` — same as Sallyspeak.\n\n"
+            "`!sallyspeak message` — Saly says your message.\n"
+            "`!say message` — same as sallyspeak.\n\n"
             "**Clean Info Commands**\n"
             "`!clean messy message` — turns messy text into a clean panel.\n"
             "`!embed Title | Message` — makes a custom info embed.\n"
@@ -297,7 +289,8 @@ async def salyhelp(ctx):
             "**Preset Panels**\n"
             "`!rules` — posts the rules panel.\n"
             "`!carinfo` — posts vehicle condition info.\n"
-            "`!heistinfo` — posts heist payment times."
+            "`!heistinfo` — posts heist payment times.\n"
+            "`!slotinfo` — posts Sloty info."
         )
     )
 
@@ -333,3 +326,4 @@ if token is None:
     print(f"❌ {TOKEN_NAME} not found in Railway variables.")
 else:
     bot.run(token)
+
