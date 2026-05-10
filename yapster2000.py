@@ -1,9 +1,13 @@
 import discord
 from discord.ext import commands
-import os, json, time, random, re
+import os
+import json
+import time
+import random
+import re
 from datetime import datetime, timezone
 
-TOKEN_NAME = "TOKEN5"
+TOKEN_NAME = "TOKENS"
 
 STAFF_ROLE_ID = 1470379426297548957
 TICKET_CATEGORY_ID = 1472860643475329096
@@ -22,33 +26,40 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents, case_insensitive=True)
 bot.remove_command("help")
 
+
 def load_json(file, default):
     if not os.path.exists(file):
         return default
     try:
         with open(file, "r") as f:
             return json.load(f)
-    except:
+    except Exception:
         return default
+
 
 def save_json(file, data):
     with open(file, "w") as f:
         json.dump(data, f, indent=4)
 
+
 coins_store = load_json(COINS_FILE, {})
 tickets_store = load_json(TICKETS_FILE, {})
+
 
 def save_coins():
     save_json(COINS_FILE, coins_store)
 
+
 def save_tickets():
     save_json(TICKETS_FILE, tickets_store)
+
 
 def clean_name(name):
     name = name.lower()
     name = re.sub(r"[^a-z0-9-]", "-", name)
     name = re.sub(r"-+", "-", name)
-    return name[:40].strip("-")
+    return name[:40].strip("-") or "user"
+
 
 def make_embed(title, desc, color=0x8E7CC3):
     e = discord.Embed(
@@ -60,11 +71,13 @@ def make_embed(title, desc, color=0x8E7CC3):
     e.set_footer(text="Yapster2000")
     return e
 
+
 async def delete_cmd(ctx):
     try:
         await ctx.message.delete()
-    except:
+    except Exception:
         pass
+
 
 def ensure_coins(user_id):
     uid = str(user_id)
@@ -73,35 +86,37 @@ def ensure_coins(user_id):
         coins_store[uid] = []
 
     if isinstance(coins_store[uid], int):
-        amount = max(coins_store[uid], 0)
         expiry = time.time() + COIN_LIFE
-        coins_store[uid] = [expiry for _ in range(amount)]
+        coins_store[uid] = [expiry for _ in range(coins_store[uid])]
 
-    fixed = []
-    for c in coins_store[uid]:
+    valid = []
+    for coin in coins_store[uid]:
         try:
-            c = float(c)
-            if c > time.time():
-                fixed.append(c)
-        except:
+            coin = float(coin)
+            if coin > time.time():
+                valid.append(coin)
+        except Exception:
             pass
 
-    coins_store[uid] = fixed
+    coins_store[uid] = valid
     save_coins()
-    return coins_store[uid]
+    return valid
+
 
 def coin_count(user_id):
     return len(ensure_coins(user_id))
 
+
 def add_coins(user_id, amount=1):
     uid = str(user_id)
     ensure_coins(uid)
-    expiry = time.time() + COIN_LIFE
 
+    expiry = time.time() + COIN_LIFE
     for _ in range(amount):
         coins_store[uid].append(expiry)
 
     save_coins()
+
 
 def remove_coins(user_id, amount=1):
     uid = str(user_id)
@@ -115,16 +130,20 @@ def remove_coins(user_id, amount=1):
     save_coins()
     return True
 
+
 def next_expiry(user_id):
-    coins = ensure_coins(user_id)
-    if not coins:
+    user_coins = ensure_coins(user_id)
+
+    if not user_coins:
         return "No valid coins"
 
-    left = int(min(coins) - time.time())
+    left = int(min(user_coins) - time.time())
+
     if left <= 0:
         return "Expiring now"
 
     return f"{left // 60}m {left % 60}s"
+
 
 class CloseTicketView(discord.ui.View):
     def __init__(self):
@@ -134,6 +153,7 @@ class CloseTicketView(discord.ui.View):
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("Closing ticket...", ephemeral=True)
         await interaction.channel.delete()
+
 
 class TicketView(discord.ui.View):
     def __init__(self):
@@ -147,8 +167,8 @@ class TicketView(discord.ui.View):
         category = guild.get_channel(TICKET_CATEGORY_ID)
         staff = guild.get_role(STAFF_ROLE_ID)
 
-        if category is None or not isinstance(category, discord.CategoryChannel):
-            await interaction.response.send_message("❌ Ticket category not found or not a category.", ephemeral=True)
+        if category is None:
+            await interaction.response.send_message("❌ Ticket category not found.", ephemeral=True)
             return
 
         overwrites = {
@@ -167,7 +187,7 @@ class TicketView(discord.ui.View):
         )
 
         tickets_store[str(channel.id)] = {
-            "type": "yapper_ticket",
+            "type": "ticket",
             "user_id": str(user.id)
         }
         save_tickets()
@@ -180,6 +200,7 @@ class TicketView(discord.ui.View):
 
         await interaction.response.send_message(f"✅ Created {channel.mention}", ephemeral=True)
 
+
 class CloseWinTicketView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -189,6 +210,7 @@ class CloseWinTicketView(discord.ui.View):
         await interaction.response.send_message("Closing win ticket...", ephemeral=True)
         await interaction.channel.delete()
 
+
 async def create_win_ticket(interaction, result, emoji):
     guild = interaction.guild
     user = interaction.user
@@ -196,8 +218,8 @@ async def create_win_ticket(interaction, result, emoji):
     category = guild.get_channel(GAME_CORNER_CATEGORY_ID)
     staff = guild.get_role(STAFF_ROLE_ID)
 
-    if category is None or not isinstance(category, discord.CategoryChannel):
-        return None, "Game Corner category not found."
+    if category is None:
+        return None
 
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
@@ -218,13 +240,14 @@ async def create_win_ticket(interaction, result, emoji):
         content=user.mention,
         embed=make_embed(
             f"{emoji} Slot Win Ticket",
-            f"{user.mention} won **{result}**!\n\nSend a pic of what car you want 🚗📸\nStaff will sort your prize here.",
+            f"{user.mention} won **{result}**!\n\nSend a pic of what car you want 🚗📸",
             discord.Color.green()
         ),
         view=CloseWinTicketView()
     )
 
-    return channel, None
+    return channel
+
 
 class SlotView(discord.ui.View):
     def __init__(self):
@@ -246,35 +269,31 @@ class SlotView(discord.ui.View):
 
         roll = random.randint(1, 100)
         ticket = None
-        ticket_error = None
 
         if roll <= 70:
-            result, emoji, msg, color = "Nothing", "🚫", "maybe next time 😭", discord.Color.red()
+            result, emoji, msg, color = "Nothing", "🚫", "Maybe next time 😭", discord.Color.red()
         elif roll <= 94:
-            result, emoji, msg, color = "Normal Cars", "🚘", "not bad", discord.Color.blue()
-            ticket, ticket_error = await create_win_ticket(interaction, result, emoji)
+            result, emoji, msg, color = "Normal Cars", "🚘", "Not bad 🚘", discord.Color.blue()
+            ticket = await create_win_ticket(interaction, result, emoji)
         elif roll <= 99:
-            result, emoji, msg, color = "Hard Trade", "✨", "nice", discord.Color.gold()
-            ticket, ticket_error = await create_win_ticket(interaction, result, emoji)
+            result, emoji, msg, color = "Hard Trade", "✨", "Nice pull ✨", discord.Color.gold()
+            ticket = await create_win_ticket(interaction, result, emoji)
         else:
             result, emoji, msg, color = "Very Hard Trade", "💎", "🎰🎰💎🔥", discord.Color.purple()
-            ticket, ticket_error = await create_win_ticket(interaction, result, emoji)
+            ticket = await create_win_ticket(interaction, result, emoji)
 
         e = make_embed("🎰 Slot Machine Result", msg, color)
         e.add_field(name="Result", value=f"{emoji} {result}", inline=False)
-        e.add_field(name="Coin Cost", value="1 coin", inline=True)
         e.add_field(name="Balance", value=f"{coin_count(user.id)} valid coin(s)", inline=True)
 
         if coin_count(user.id) > 0:
-            e.add_field(name="Next Coin Expires", value=next_expiry(user.id), inline=False)
+            e.add_field(name="Next Coin Expires", value=next_expiry(user.id), inline=True)
 
-        if result != "Nothing":
-            if ticket:
-                e.add_field(name="Win Ticket", value=ticket.mention, inline=False)
-            else:
-                e.add_field(name="Win Ticket", value=f"❌ Could not create ticket: {ticket_error}", inline=False)
+        if ticket:
+            e.add_field(name="Win Ticket", value=ticket.mention, inline=False)
 
         await interaction.followup.send(embed=e)
+
 
 @bot.event
 async def on_ready():
@@ -286,6 +305,7 @@ async def on_ready():
     print("----------------------------")
     print(f"🤖 Yapster2000 logged in as {bot.user}")
     print("----------------------------")
+
 
 @bot.event
 async def on_member_remove(member):
@@ -307,6 +327,7 @@ async def on_member_remove(member):
 
     await channel.send(f"bye I guess... <@{member.id}>", embed=e)
 
+
 @bot.event
 async def on_guild_channel_delete(channel):
     cid = str(channel.id)
@@ -315,19 +336,15 @@ async def on_guild_channel_delete(channel):
         return
 
     data = tickets_store[cid]
-    user_id = None
-
-    if isinstance(data, dict):
-        user_id = data.get("user_id")
-    elif isinstance(data, str):
-        user_id = data
+    user_id = data.get("user_id")
 
     if user_id:
         add_coins(user_id, 1)
-        print(f"Ticket closed. Added 1 coin to user ID {user_id}")
+        print(f"Ticket closed. Added 1 coin to {user_id}")
 
     del tickets_store[cid]
     save_tickets()
+
 
 @bot.command()
 @commands.has_permissions(administrator=True)
@@ -336,6 +353,8 @@ async def ticket(ctx):
         embed=make_embed("🎟️ Ticket Machine", "Click below to create a ticket.", discord.Color.green()),
         view=TicketView()
     )
+    await delete_cmd(ctx)
+
 
 @bot.command()
 @commands.has_permissions(administrator=True)
@@ -354,6 +373,8 @@ async def slotpanel(ctx):
         ),
         view=SlotView()
     )
+    await delete_cmd(ctx)
+
 
 @bot.command(name="coins", aliases=["balance", "bal"])
 async def coins_command(ctx, member: discord.Member = None):
@@ -363,12 +384,15 @@ async def coins_command(ctx, member: discord.Member = None):
         f"⏰ Next coin expires: **{next_expiry(member.id)}**"
     )
 
+
 @bot.command(name="addcoins", aliases=["givecoins"])
 @commands.has_permissions(administrator=True)
 async def addcoins_command(ctx, amount: int, member: discord.Member = None):
     member = member or ctx.author
     add_coins(member.id, amount)
     await ctx.send(f"✅ Added **{amount}** coin(s) to {member.mention}. They expire in **1 hour**.")
+    await delete_cmd(ctx)
+
 
 @bot.command(name="removecoins", aliases=["takecoins"])
 @commands.has_permissions(administrator=True)
@@ -380,11 +404,15 @@ async def removecoins_command(ctx, amount: int, member: discord.Member = None):
     else:
         await ctx.send(f"❌ {member.mention} does not have enough valid coins.")
 
+    await delete_cmd(ctx)
+
+
 @bot.command(name="sallyspeak", aliases=["say", "speak", "yap"])
 @commands.has_permissions(administrator=True)
 async def sallyspeak(ctx, *, message: str):
     await ctx.send(message)
     await delete_cmd(ctx)
+
 
 @bot.command(name="embed", aliases=["panel"])
 @commands.has_permissions(administrator=True)
@@ -396,6 +424,7 @@ async def embed_command(ctx, *, text: str):
 
     await ctx.send(embed=make_embed(title.strip(), body.strip()))
     await delete_cmd(ctx)
+
 
 @bot.command()
 @commands.has_permissions(administrator=True)
@@ -413,6 +442,7 @@ async def slotinfo(ctx):
     ))
     await delete_cmd(ctx)
 
+
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def rules(ctx):
@@ -428,9 +458,11 @@ async def rules(ctx):
     ))
     await delete_cmd(ctx)
 
+
 @bot.command()
 async def testguilt(ctx):
     await ctx.send("⚖️ Board of Guilt is alive. Nobody is safe.")
+
 
 @bot.command()
 async def yapsterhelp(ctx):
@@ -448,6 +480,7 @@ async def yapsterhelp(ctx):
         "`!rules` — rules panel\n"
         "`!testguilt` — test Board of Guilt"
     )
+
 
 @bot.event
 async def on_command_error(ctx, error):
@@ -469,9 +502,11 @@ async def on_command_error(ctx, error):
     print(error)
     await ctx.send("❌ Something went wrong. Check Railway logs.")
 
+
 token = os.getenv(TOKEN_NAME)
 
 if token is None:
-    print(f"❌ {TOKEN_NAME} not found.")
+    print(f"❌ {TOKEN_NAME} not found in Railway variables.")
 else:
+    token = token.strip()
     bot.run(token)
