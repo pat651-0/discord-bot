@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands
+from discord import app_commands
 import os
 import json
 import re
@@ -17,31 +18,128 @@ MAX_WARNINGS = 3
 SPAM_LIMIT = 5
 SPAM_SECONDS = 10
 
-# These are banned anywhere in the message.
-# Discord invite links are NOT banned.
+# Kick or ban when they reach max warnings
+PUNISHMENT_ON_MAX_WARNINGS = "kick"  # change to "ban" if you want bans
+
+# Sales are allowed.
+# Discord server links are allowed.
+# Car trading words are allowed.
+# This list only targets modded accounts / account sales / money boosts.
 BANNED_PHRASES = [
+    # Mass pings
     "@everyone",
     "@here",
 
+    # Modded account wording
     "modded account",
     "modded accounts",
     "modded acc",
     "modded accs",
-    "modded",
+    "modded gta account",
+    "modded gta accounts",
+    "gta modded account",
+    "gta modded accounts",
+    "pre modded account",
+    "pre-modded account",
+    "fresh modded account",
+    "fresh modded accounts",
+    "stacked account",
+    "stacked accounts",
+    "boosted account",
+    "boosted accounts",
+    "maxed account",
+    "maxed accounts",
+    "ranked account",
+    "ranked accounts",
+    "high level account",
+    "high level accounts",
+    "recovery account",
+    "recovery accounts",
 
+    # Account selling only
+    "account for sale",
+    "accounts for sale",
+    "account's for sale",
+    "acc for sale",
+    "accs for sale",
+    "account sale",
+    "accounts sale",
+    "selling account",
+    "selling accounts",
+    "selling acc",
+    "selling accs",
+    "sell account",
+    "sell accounts",
+    "sell acc",
+    "sell accs",
+    "buy account",
+    "buy accounts",
+    "buy acc",
+    "buy accs",
+    "account selling",
+    "account seller",
+    "acc seller",
+    "account shop",
+    "acc shop",
+    "account store",
+    "acc store",
+    "cheap account",
+    "cheap accounts",
+    "cheap acc",
+    "cheap accs",
+
+    # Money service wording
+    "money service",
+    "money services",
+    "money serv",
     "money boost",
     "money boosts",
     "money boosting",
+    "cash service",
+    "cash services",
     "cash boost",
     "cash boosts",
+    "cash boosting",
+    "money drop",
+    "money drops",
+    "cash drop",
+    "cash drops",
+    "gta money service",
+    "gta money services",
+    "gta cash service",
+    "gta cash services",
+    "bank boost",
+    "bank boosts",
 
+    # Account/rank/XP boost services
     "account boost",
     "account boosting",
-    "boosting service",
+    "rank boost",
+    "rank boosts",
+    "rp boost",
+    "rp boosts",
+    "level boost",
+    "level boosts",
+    "xp boost",
+    "xp boosts",
 
-    "selling accounts",
-    "sell accounts",
-    "buy accounts",
+    # Unlocks / recoveries
+    "unlock all",
+    "unlock-all",
+    "unlock service",
+    "unlock services",
+    "unlocks service",
+    "unlocks services",
+    "recovery service",
+    "recovery services",
+    "account recovery",
+    "account recoveries",
+    "gta recovery",
+    "gta recoveries",
+    "boosting service",
+    "boosting services",
+    "mod menu service",
+    "mod menu services",
 ]
 
 # ---------------- INTENTS ----------------
@@ -53,6 +151,7 @@ intents.members = True
 bot = commands.Bot(command_prefix="?", intents=intents)
 
 recent_messages = defaultdict(list)
+bot.synced = False
 
 # ---------------- JSON HELPERS ----------------
 def load_json(file_name, default):
@@ -135,11 +234,9 @@ def detect_offence(message_content):
         phrase_normal = normalize_text(phrase)
         phrase_compact = compact_text(phrase)
 
-        # Detect phrase normally anywhere in the message
         if phrase_normal in normal:
             return f"Banned phrase: {phrase}"
 
-        # Detect sneaky versions like m0dded acc / money_boost
         if phrase_compact and phrase_compact in compact:
             return f"Banned phrase: {phrase}"
 
@@ -167,7 +264,7 @@ def is_spam(user_id, content):
 
 
 # ---------------- WALL LOG ----------------
-async def send_wall_log(member, offence, punishment, message_content, warning_count):
+async def send_wall_log(member, offence, punishment, message_content, warning_count, moderator=None):
     channel = bot.get_channel(WALL_CHANNEL_ID)
 
     if channel is None:
@@ -188,13 +285,68 @@ async def send_wall_log(member, offence, punishment, message_content, warning_co
     embed.add_field(name="Warnings", value=f"{warning_count}/{MAX_WARNINGS}", inline=True)
     embed.add_field(name="Punishment", value=punishment, inline=True)
 
+    if moderator is not None:
+        embed.add_field(name="Moderator", value=moderator.mention, inline=False)
+
     if message_content:
         safe_message = message_content[:900]
-        embed.add_field(name="Deleted Message", value=f"```{safe_message}```", inline=False)
+        embed.add_field(name="Message", value=f"```{safe_message}```", inline=False)
 
     embed.set_thumbnail(url=member.display_avatar.url)
 
     await channel.send(embed=embed)
+
+
+# ---------------- PUNISHMENT ----------------
+async def punish_if_needed(guild, channel, member, offence, warning_count):
+    if warning_count < MAX_WARNINGS:
+        return False
+
+    if member.guild_permissions.administrator:
+        await channel.send(f"❌ {member.mention} reached max warnings, but I cannot punish an admin.")
+        return True
+
+    bot_member = guild.me or guild.get_member(bot.user.id)
+
+    if bot_member.top_role <= member.top_role:
+        await channel.send(
+            f"❌ {member.mention} reached max warnings, but my role is not high enough to punish them."
+        )
+        return True
+
+    if PUNISHMENT_ON_MAX_WARNINGS.lower() == "ban":
+        try:
+            await member.send(
+                f"🔨 You were banned from *{guild.name}*.\n"
+                f"Reason: **{offence}**\n"
+                f"You reached *{MAX_WARNINGS} warnings*."
+            )
+        except Exception:
+            pass
+
+        await member.ban(
+            reason=f"Reached {MAX_WARNINGS} warnings. Last offence: {offence}",
+            delete_message_days=0
+        )
+
+        clear_warnings(member.id)
+        return True
+
+    try:
+        await member.send(
+            f"🔨 You were kicked from *{guild.name}*.\n"
+            f"Reason: **{offence}**\n"
+            f"You reached *{MAX_WARNINGS} warnings*."
+        )
+    except Exception:
+        pass
+
+    await member.kick(
+        reason=f"Reached {MAX_WARNINGS} warnings. Last offence: {offence}"
+    )
+
+    clear_warnings(member.id)
+    return True
 
 
 # ---------------- READY ----------------
@@ -203,6 +355,18 @@ async def on_ready():
     print("----------------------------")
     print(f"🔨 Knob Bot logged in as {bot.user}")
     print("----------------------------")
+
+    # Sync slash commands quickly to every server the bot is in
+    if not bot.synced:
+        for guild in bot.guilds:
+            try:
+                bot.tree.copy_global_to(guild=guild)
+                await bot.tree.sync(guild=guild)
+                print(f"✅ Slash commands synced in {guild.name}")
+            except Exception as e:
+                print(f"❌ Slash sync failed in {guild.name}: {e}")
+
+        bot.synced = True
 
 
 # ---------------- AUTO MODERATION ----------------
@@ -216,7 +380,7 @@ async def on_message(message):
 
     member = message.author
 
-    # Staff/admins are immune
+    # Staff/admins are immune from auto moderation
     if member.guild_permissions.administrator or member.guild_permissions.manage_messages:
         await bot.process_commands(message)
         return
@@ -231,7 +395,6 @@ async def on_message(message):
     if offence is not None:
         warning_count = add_warning(member.id)
 
-        # Delete the rule-breaking message
         try:
             await message.delete()
         except discord.Forbidden:
@@ -242,7 +405,7 @@ async def on_message(message):
             pass
 
         if warning_count >= MAX_WARNINGS:
-            punishment = "Kicked"
+            punishment = "Banned" if PUNISHMENT_ON_MAX_WARNINGS.lower() == "ban" else "Kicked"
 
             await send_wall_log(
                 member=member,
@@ -253,27 +416,15 @@ async def on_message(message):
             )
 
             try:
-                await member.send(
-                    f"🔨 You were kicked from *{message.guild.name}*.\n"
-                    f"Reason: **{offence}**\n"
-                    f"You reached *{MAX_WARNINGS} warnings*."
-                )
-            except Exception:
-                pass
-
-            try:
-                await member.kick(
-                    reason=f"Reached {MAX_WARNINGS} warnings. Last offence: {offence}"
-                )
-                clear_warnings(member.id)
+                await punish_if_needed(message.guild, message.channel, member, offence, warning_count)
             except discord.Forbidden:
                 await message.channel.send(
-                    f"❌ I tried to kick {member.mention}, but my role is not high enough."
+                    f"❌ I tried to punish {member.mention}, but I do not have permission."
                 )
             except Exception as e:
                 print(e)
                 await message.channel.send(
-                    f"❌ I tried to kick {member.mention}, but something went wrong."
+                    f"❌ I tried to punish {member.mention}, but something went wrong."
                 )
 
             return
@@ -296,7 +447,46 @@ async def on_message(message):
     await bot.process_commands(message)
 
 
-# ---------------- COMMANDS ----------------
+# ---------------- PREFIX COMMANDS ----------------
+@bot.command(name="warn")
+@commands.has_permissions(manage_messages=True)
+async def prefix_warn(ctx, member: discord.Member, *, reason):
+    warning_count = add_warning(member.id)
+
+    await send_wall_log(
+        member=member,
+        offence=reason,
+        punishment="Manual warning",
+        message_content="Manual staff warning",
+        warning_count=warning_count,
+        moderator=ctx.author
+    )
+
+    await ctx.send(
+        f"⚠️ {member.mention} has been warned by {ctx.author.mention}.\n"
+        f"Reason: **{reason}**\n"
+        f"Warnings: *{warning_count}/{MAX_WARNINGS}*"
+    )
+
+    if warning_count >= MAX_WARNINGS:
+        punishment = "Banned" if PUNISHMENT_ON_MAX_WARNINGS.lower() == "ban" else "Kicked"
+
+        await send_wall_log(
+            member=member,
+            offence=reason,
+            punishment=punishment,
+            message_content="Reached max warnings from manual warning",
+            warning_count=warning_count,
+            moderator=ctx.author
+        )
+
+        try:
+            await punish_if_needed(ctx.guild, ctx.channel, member, reason, warning_count)
+        except Exception as e:
+            print(e)
+            await ctx.send("❌ I tried to punish them, but something went wrong.")
+
+
 @bot.command(name="warnings")
 @commands.has_permissions(manage_messages=True)
 async def warnings(ctx, member: discord.Member = None):
@@ -323,10 +513,11 @@ async def knobstatus(ctx):
         title="🔨 Knob Bot Status",
         description=(
             "Knob Bot is active.\n\n"
-            f"Punishment: **Kick after {MAX_WARNINGS} warnings**\n"
-            "Bad messages are automatically deleted.\n\n"
+            f"Punishment: **{PUNISHMENT_ON_MAX_WARNINGS.title()} after {MAX_WARNINGS} warnings**\n"
+            "Bad messages are automatically deleted.\n"
+            "Sales, car trading, and Discord links are allowed.\n\n"
             "**Banned phrases:**\n"
-            f"{banned_list}"
+            f"{banned_list[:3500]}"
         ),
         color=discord.Color.red()
     )
@@ -344,13 +535,79 @@ async def manualwall(ctx, member: discord.Member, *, offence):
         offence=offence,
         punishment="Manual warning",
         message_content="Manual staff report",
-        warning_count=warning_count
+        warning_count=warning_count,
+        moderator=ctx.author
     )
 
     await ctx.send(f"🧱 Added {member.mention} to the Wall of Knobs.")
 
 
-# ---------------- ERROR HANDLER ----------------
+# ---------------- SLASH COMMANDS ----------------
+@bot.tree.command(name="warn", description="Manually warn a member")
+@app_commands.describe(
+    member="The member to warn",
+    reason="The reason for the warning"
+)
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_warn(interaction: discord.Interaction, member: discord.Member, reason: str):
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+
+    warning_count = add_warning(member.id)
+
+    await send_wall_log(
+        member=member,
+        offence=reason,
+        punishment="Manual warning",
+        message_content="Manual slash warning",
+        warning_count=warning_count,
+        moderator=interaction.user
+    )
+
+    await interaction.response.send_message(
+        f"⚠️ {member.mention} has been warned by {interaction.user.mention}.\n"
+        f"Reason: **{reason}**\n"
+        f"Warnings: *{warning_count}/{MAX_WARNINGS}*"
+    )
+
+    if warning_count >= MAX_WARNINGS:
+        punishment = "Banned" if PUNISHMENT_ON_MAX_WARNINGS.lower() == "ban" else "Kicked"
+
+        await send_wall_log(
+            member=member,
+            offence=reason,
+            punishment=punishment,
+            message_content="Reached max warnings from slash warning",
+            warning_count=warning_count,
+            moderator=interaction.user
+        )
+
+        try:
+            await punish_if_needed(interaction.guild, interaction.channel, member, reason, warning_count)
+        except Exception as e:
+            print(e)
+            await interaction.followup.send("❌ I tried to punish them, but something went wrong.")
+
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message(
+            "❌ You need *Manage Messages* permission to use this command.",
+            ephemeral=True
+        )
+        return
+
+    print(error)
+
+    if interaction.response.is_done():
+        await interaction.followup.send("❌ Something went wrong. Check Railway logs.", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ Something went wrong. Check Railway logs.", ephemeral=True)
+
+
+# ---------------- PREFIX ERROR HANDLER ----------------
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
@@ -367,6 +624,7 @@ async def on_command_error(ctx, error):
     if isinstance(error, commands.MissingRequiredArgument):
         await ctx.send(
             "❌ Missing info. Try:\n"
+            "`?warn @user reason`\n"
             "`?warnings @user`\n"
             "`?clearwarnings @user`\n"
             "?manualwall @user offence"
