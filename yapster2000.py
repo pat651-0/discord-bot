@@ -1,56 +1,171 @@
 import discord
 from discord.ext import commands
+from discord import app_commands
 import os
 import json
+import re
 import time
 import random
-import re
-from datetime import datetime, timezone
+import asyncio
+from collections import defaultdict
 
-# ==================================================
-# YAPSTER2000
-# Sally + Sloty + Yapper + Board of Guilt in one bot
-# ==================================================
-
-# Railway variable can be either TOKENS or TOKEN5
-TOKEN = (os.getenv("TOKENS") or os.getenv("TOKEN5") or "").strip()
-
-# Removes accidental quotes if pasted like "token"
-TOKEN = TOKEN.strip('"').strip("'")
+# ---------------- TOKEN ----------------
+TOKEN_NAME = "TOKEN"
 
 # ---------------- IDS ----------------
-STAFF_ROLE_ID = 1470379426297548957
-TICKET_CATEGORY_ID = 1472860643475329096
-GAME_CORNER_CATEGORY_ID = 1500809187595259984
+
+STAFF_ROLE_IDS = [
+    1470379426297548957
+]
+
+TICKET_CATEGORY_IDS = [
+    1472860643475329096,  # your server ticket category
+    1507876447467995226   # friend's server ticket category
+]
+
 LEAVES_CHANNEL_ID = 1475079442291363901
+WALL_CHANNEL_ID = 1509103133479932085
 
 # ---------------- FILES ----------------
-COINS_FILE = "coins.json"
-TICKETS_FILE = "tickets.json"
+YAPPER_SETTINGS_FILE = "yapper_settings.json"
+WARNINGS_FILE = "knob_warnings.json"
 
-# Coins expire after 1 hour
-COIN_LIFE_SECONDS = 60 * 60
+# ---------------- GIVEAWAY SETTINGS ----------------
+GIVEAWAY_TIME = 24 * 60 * 60
+TEST_GIVEAWAY_TIME = 30
+
+# ---------------- MODERATION SETTINGS ----------------
+MAX_WARNINGS = 3
+SPAM_LIMIT = 5
+SPAM_SECONDS = 10
+
+# use "kick" or "ban"
+PUNISHMENT_ON_MAX_WARNINGS = "kick"
+
+BANNED_PHRASES = [
+    "@everyone",
+    "@here",
+
+    "modded account",
+    "modded accounts",
+    "modded acc",
+    "modded accs",
+    "modded gta account",
+    "modded gta accounts",
+    "gta modded account",
+    "gta modded accounts",
+    "pre modded account",
+    "pre-modded account",
+    "fresh modded account",
+    "fresh modded accounts",
+    "stacked account",
+    "stacked accounts",
+    "boosted account",
+    "boosted accounts",
+    "maxed account",
+    "maxed accounts",
+    "ranked account",
+    "ranked accounts",
+    "high level account",
+    "high level accounts",
+    "recovery account",
+    "recovery accounts",
+
+    "account for sale",
+    "accounts for sale",
+    "account's for sale",
+    "acc for sale",
+    "accs for sale",
+    "account sale",
+    "accounts sale",
+    "selling account",
+    "selling accounts",
+    "selling acc",
+    "selling accs",
+    "sell account",
+    "sell accounts",
+    "sell acc",
+    "sell accs",
+    "buy account",
+    "buy accounts",
+    "buy acc",
+    "buy accs",
+    "account selling",
+    "account seller",
+    "acc seller",
+    "account shop",
+    "acc shop",
+    "account store",
+    "acc store",
+    "cheap account",
+    "cheap accounts",
+    "cheap acc",
+    "cheap accs",
+
+    "money service",
+    "money services",
+    "money serv",
+    "money boost",
+    "money boosts",
+    "money boosting",
+    "cash service",
+    "cash services",
+    "cash boost",
+    "cash boosts",
+    "cash boosting",
+    "money drop",
+    "money drops",
+    "cash drop",
+    "cash drops",
+    "gta money service",
+    "gta money services",
+    "gta cash service",
+    "gta cash services",
+    "bank boost",
+    "bank boosts",
+
+    "account boost",
+    "account boosting",
+    "rank boost",
+    "rank boosts",
+    "rp boost",
+    "rp boosts",
+    "level boost",
+    "level boosts",
+    "xp boost",
+    "xp boosts",
+
+    "unlock all",
+    "unlock-all",
+    "unlock service",
+    "unlock services",
+    "unlocks service",
+    "unlocks services",
+    "recovery service",
+    "recovery services",
+    "account recovery",
+    "account recoveries",
+    "gta recovery",
+    "gta recoveries",
+    "boosting service",
+    "boosting services",
+    "mod menu service",
+    "mod menu services",
+]
 
 # ---------------- INTENTS ----------------
 intents = discord.Intents.default()
+intents.message_content = True
 intents.guilds = True
 intents.members = True
-intents.message_content = True
+intents.reactions = True
 
-bot = commands.Bot(
-    command_prefix="!",
-    intents=intents,
-    case_insensitive=True
-)
+bot = commands.Bot(command_prefix=["!", "?"], intents=intents)
 
-bot.remove_command("help")
+recent_messages = defaultdict(list)
+bot.synced = False
 
-VIEWS_ADDED = False
-
-
-# ==================================================
-# JSON HELPERS
-# ==================================================
+# ---------------- JSON HELPERS ----------------
 def load_json(file_name, default):
     if not os.path.exists(file_name):
         return default
@@ -67,227 +182,256 @@ def save_json(file_name, data):
         json.dump(data, file, indent=4)
 
 
-coins_store = load_json(COINS_FILE, {})
-tickets_store = load_json(TICKETS_FILE, {})
+yapper_settings = load_json(YAPPER_SETTINGS_FILE, {})
+warnings_store = load_json(WARNINGS_FILE, {})
 
 
-def save_coins():
-    save_json(COINS_FILE, coins_store)
+def save_yapper_settings():
+    save_json(YAPPER_SETTINGS_FILE, yapper_settings)
 
 
-def save_tickets():
-    save_json(TICKETS_FILE, tickets_store)
+def save_warnings():
+    save_json(WARNINGS_FILE, warnings_store)
 
 
-# ==================================================
-# GENERAL HELPERS
-# ==================================================
-def make_embed(title, description, color=0x8E7CC3):
-    embed = discord.Embed(
-        title=title,
-        description=description,
-        color=color,
-        timestamp=datetime.now(timezone.utc)
-    )
-    embed.set_footer(text="Yapster2000")
-    return embed
+# ---------------- TICKET HELPERS ----------------
+def get_ticket_category(guild):
+    guild_id = str(guild.id)
 
+    if guild_id in yapper_settings:
+        saved_category_id = int(yapper_settings[guild_id])
+        category = guild.get_channel(saved_category_id)
 
-async def delete_command(ctx):
-    try:
-        await ctx.message.delete()
-    except Exception:
-        pass
+        if isinstance(category, discord.CategoryChannel):
+            return category
+
+    for category_id in TICKET_CATEGORY_IDS:
+        category = guild.get_channel(category_id)
+
+        if isinstance(category, discord.CategoryChannel):
+            return category
+
+    return None
 
 
 def clean_channel_name(name):
     name = name.lower()
     name = re.sub(r"[^a-z0-9-]", "-", name)
     name = re.sub(r"-+", "-", name)
-    name = name[:40].strip("-")
-
-    if not name:
-        name = "user"
-
-    return name
+    return name.strip("-")[:40]
 
 
-async def find_member(ctx, raw_target):
-    if ctx.guild is None:
-        return None
-
-    if raw_target is None:
-        return None
-
-    raw_target = str(raw_target).strip()
-
-    mention_match = re.fullmatch(r"<@!?(\d+)>", raw_target)
-
-    if mention_match:
-        user_id = int(mention_match.group(1))
-    elif raw_target.isdigit():
-        user_id = int(raw_target)
-    else:
-        lowered = raw_target.lower()
-
-        for member in ctx.guild.members:
-            if member.name.lower() == lowered or member.display_name.lower() == lowered:
-                return member
-
-        return None
-
-    member = ctx.guild.get_member(user_id)
-
-    if member is not None:
-        return member
-
-    try:
-        return await ctx.guild.fetch_member(user_id)
-    except Exception:
-        return None
+# ---------------- WARNING HELPERS ----------------
+def get_warnings(user_id):
+    return warnings_store.get(str(user_id), 0)
 
 
-# ==================================================
-# COIN SYSTEM
-# ==================================================
-def ensure_coin_list(user_id):
+def add_warning(user_id):
     uid = str(user_id)
-    changed = False
-
-    if uid not in coins_store:
-        coins_store[uid] = []
-        changed = True
-
-    value = coins_store[uid]
-
-    # Old format support: {"123": 5}
-    if isinstance(value, int):
-        amount = max(value, 0)
-        expiry = time.time() + COIN_LIFE_SECONDS
-        coins_store[uid] = [expiry for _ in range(amount)]
-        changed = True
-
-    elif isinstance(value, list):
-        fixed = []
-
-        for expiry in value:
-            try:
-                expiry = float(expiry)
-                if expiry > time.time():
-                    fixed.append(expiry)
-            except Exception:
-                pass
-
-        coins_store[uid] = fixed
-        changed = True
-
-    else:
-        coins_store[uid] = []
-        changed = True
-
-    if changed:
-        save_coins()
-
-    return coins_store[uid]
+    warnings_store[uid] = warnings_store.get(uid, 0) + 1
+    save_warnings()
+    return warnings_store[uid]
 
 
-def get_coin_count(user_id):
-    return len(ensure_coin_list(user_id))
-
-
-def add_coins_to_user(user_id, amount):
+def clear_warnings(user_id):
     uid = str(user_id)
-    ensure_coin_list(uid)
 
-    expiry = time.time() + COIN_LIFE_SECONDS
-
-    for _ in range(amount):
-        coins_store[uid].append(expiry)
-
-    save_coins()
+    if uid in warnings_store:
+        del warnings_store[uid]
+        save_warnings()
 
 
-def remove_coins_from_user(user_id, amount):
+# ---------------- SMART DETECTION ----------------
+def normalize_text(text):
+    text = text.lower()
+    text = text.replace("@\u200b", "@")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def compact_text(text):
+    text = text.lower()
+
+    replacements = {
+        "0": "o",
+        "1": "i",
+        "3": "e",
+        "4": "a",
+        "5": "s",
+        "7": "t",
+        "$": "s",
+        "!": "i",
+        "@": "a"
+    }
+
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
+    text = re.sub(r"[^a-z0-9]", "", text)
+    return text
+
+
+def detect_offence(message_content):
+    normal = normalize_text(message_content)
+    compact = compact_text(message_content)
+
+    for phrase in BANNED_PHRASES:
+        phrase_normal = normalize_text(phrase)
+        phrase_compact = compact_text(phrase)
+
+        if phrase_normal in normal:
+            return f"Banned phrase: {phrase}"
+
+        if phrase_compact and phrase_compact in compact:
+            return f"Banned phrase: {phrase}"
+
+    return None
+
+
+def is_spam(user_id, content):
+    now = time.time()
     uid = str(user_id)
-    ensure_coin_list(uid)
+    clean_content = normalize_text(content)
 
-    if len(coins_store[uid]) < amount:
+    recent_messages[uid].append((now, clean_content))
+
+    recent_messages[uid] = [
+        item for item in recent_messages[uid]
+        if now - item[0] <= SPAM_SECONDS
+    ]
+
+    same_messages = [
+        item for item in recent_messages[uid]
+        if item[1] == clean_content
+    ]
+
+    return len(same_messages) >= SPAM_LIMIT
+
+
+# ---------------- WALL LOG ----------------
+async def send_wall_log(member, offence, punishment, message_content, warning_count, moderator=None):
+    channel = bot.get_channel(WALL_CHANNEL_ID)
+
+    if channel is None:
+        print(f"❌ Wall of Knobs channel not found: {WALL_CHANNEL_ID}")
+        return
+
+    embed = discord.Embed(
+        title="🧱 Wall of Knobs 🧱",
+        description="Another rule breaker has been added to the wall.",
+        color=discord.Color.red()
+    )
+
+    embed.add_field(name="Their @", value=member.mention, inline=False)
+    embed.add_field(name="Display Name", value=member.display_name, inline=True)
+    embed.add_field(name="Username", value=str(member), inline=True)
+    embed.add_field(name="User ID", value=str(member.id), inline=False)
+    embed.add_field(name="Offence", value=offence, inline=False)
+    embed.add_field(name="Warnings", value=f"{warning_count}/{MAX_WARNINGS}", inline=True)
+    embed.add_field(name="Punishment", value=punishment, inline=True)
+
+    if moderator is not None:
+        embed.add_field(name="Moderator", value=moderator.mention, inline=False)
+
+    if message_content:
+        safe_message = message_content[:900]
+        embed.add_field(name="Message", value=f"```{safe_message}```", inline=False)
+
+    embed.set_thumbnail(url=member.display_avatar.url)
+
+    await channel.send(embed=embed)
+
+
+async def punish_if_needed(guild, channel, member, offence, warning_count):
+    if warning_count < MAX_WARNINGS:
         return False
 
-    coins_store[uid].sort()
-    coins_store[uid] = coins_store[uid][amount:]
-    save_coins()
+    if member.guild_permissions.administrator:
+        await channel.send(f"❌ {member.mention} reached max warnings, but I cannot punish an admin.")
+        return True
+
+    bot_member = guild.me or guild.get_member(bot.user.id)
+
+    if bot_member.top_role <= member.top_role:
+        await channel.send(
+            f"❌ {member.mention} reached max warnings, but my role is not high enough."
+        )
+        return True
+
+    if PUNISHMENT_ON_MAX_WARNINGS.lower() == "ban":
+        try:
+            await member.send(
+                f"🔨 You were banned from *{guild.name}*.\n"
+                f"Reason: **{offence}**\n"
+                f"You reached *{MAX_WARNINGS} warnings*."
+            )
+        except Exception:
+            pass
+
+        await member.ban(
+            reason=f"Reached {MAX_WARNINGS} warnings. Last offence: {offence}",
+            delete_message_days=0
+        )
+
+        clear_warnings(member.id)
+        return True
+
+    try:
+        await member.send(
+            f"🔨 You were kicked from *{guild.name}*.\n"
+            f"Reason: **{offence}**\n"
+            f"You reached *{MAX_WARNINGS} warnings*."
+        )
+    except Exception:
+        pass
+
+    await member.kick(
+        reason=f"Reached {MAX_WARNINGS} warnings. Last offence: {offence}"
+    )
+
+    clear_warnings(member.id)
     return True
 
 
-def get_next_expiry_text(user_id):
-    coin_list = ensure_coin_list(user_id)
-
-    if not coin_list:
-        return "No valid coins"
-
-    seconds_left = int(min(coin_list) - time.time())
-
-    if seconds_left <= 0:
-        return "Expiring now"
-
-    minutes = seconds_left // 60
-    seconds = seconds_left % 60
-
-    if minutes >= 60:
-        hours = minutes // 60
-        minutes = minutes % 60
-        return f"{hours}h {minutes}m"
-
-    return f"{minutes}m {seconds}s"
-
-
-# ==================================================
-# YAPPER TICKET SYSTEM
-# ==================================================
-class CloseTicketView(discord.ui.View):
+# ---------------- TICKET BUTTONS ----------------
+class CloseButton(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(
         label="Close Ticket",
         style=discord.ButtonStyle.red,
-        custom_id="yapster_close_ticket"
+        custom_id="merged_close_ticket"
     )
-    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("Closing ticket...", ephemeral=True)
-
-        try:
-            await interaction.channel.delete()
-        except discord.Forbidden:
-            await interaction.followup.send("❌ I do not have permission to delete this ticket.", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Could not close ticket: {e}", ephemeral=True)
+        await interaction.channel.delete()
 
 
-class TicketView(discord.ui.View):
+class TicketButton(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(
-        label="🎟️ Create Ticket",
+        label="🎫 Create Ticket",
         style=discord.ButtonStyle.green,
-        custom_id="yapster_create_ticket"
+        custom_id="merged_create_ticket"
     )
     async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild = interaction.guild
         user = interaction.user
 
         if guild is None:
-            await interaction.response.send_message("❌ This only works in a server.", ephemeral=True)
+            await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
             return
 
-        category = guild.get_channel(TICKET_CATEGORY_ID)
-        staff_role = guild.get_role(STAFF_ROLE_ID)
-        bot_member = guild.me or guild.get_member(bot.user.id)
+        category = get_ticket_category(guild)
 
-        if category is None or not isinstance(category, discord.CategoryChannel):
-            await interaction.response.send_message("❌ Ticket category not found or not a category.", ephemeral=True)
+        if category is None:
+            await interaction.response.send_message(
+                "❌ Ticket category not found. Admin can use !setcategory CATEGORY_ID.",
+                ephemeral=True
+            )
             return
 
         overwrites = {
@@ -295,260 +439,78 @@ class TicketView(discord.ui.View):
             user: discord.PermissionOverwrite(
                 view_channel=True,
                 send_messages=True,
-                read_message_history=True
-            )
-        }
-
-        if bot_member is not None:
-            overwrites[bot_member] = discord.PermissionOverwrite(
+                read_message_history=True,
+                attach_files=True
+            ),
+            guild.me: discord.PermissionOverwrite(
                 view_channel=True,
                 send_messages=True,
                 read_message_history=True,
                 manage_channels=True
             )
+        }
 
-        if staff_role is not None:
-            overwrites[staff_role] = discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True
+        for role_id in STAFF_ROLE_IDS:
+            role = guild.get_role(role_id)
+            if role is not None:
+                overwrites[role] = discord.PermissionOverwrite(
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True,
+                    attach_files=True
+                )
+
+        channel_name = f"ticket-{clean_channel_name(user.name)}"
+        existing = discord.utils.get(category.text_channels, name=channel_name)
+
+        if existing:
+            await interaction.response.send_message(
+                f"❌ You already have a ticket: {existing.mention}",
+                ephemeral=True
             )
+            return
 
         try:
             channel = await guild.create_text_channel(
-                name=f"ticket-{clean_channel_name(user.name)}",
+                name=channel_name,
                 category=category,
-                overwrites=overwrites,
-                reason="Yapster2000 ticket created"
+                overwrites=overwrites
             )
         except discord.Forbidden:
-            await interaction.response.send_message("❌ I need Manage Channels permission.", ephemeral=True)
-            return
-        except Exception as e:
-            await interaction.response.send_message(f"❌ Could not create ticket: {e}", ephemeral=True)
-            return
-
-        tickets_store[str(channel.id)] = {
-            "type": "yapper_ticket",
-            "user_id": str(user.id)
-        }
-        save_tickets()
-
-        embed = make_embed(
-            "🎟️ Ticket Created",
-            (
-                f"{user.mention}, welcome to your ticket.\n\n"
-                "Staff will help you soon."
-            ),
-            discord.Color.green()
-        )
-
-        await channel.send(
-            content=user.mention,
-            embed=embed,
-            view=CloseTicketView()
-        )
-
-        await interaction.response.send_message(f"✅ Ticket created: {channel.mention}", ephemeral=True)
-
-
-# ==================================================
-# SLOTY SYSTEM
-# ==================================================
-class CloseWinTicketView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(
-        label="Close Win Ticket",
-        style=discord.ButtonStyle.red,
-        custom_id="yapster_close_win_ticket"
-    )
-    async def close_win_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("Closing win ticket...", ephemeral=True)
-
-        try:
-            await interaction.channel.delete()
-        except discord.Forbidden:
-            await interaction.followup.send("❌ I do not have permission to delete this ticket.", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Could not close ticket: {e}", ephemeral=True)
-
-
-async def create_win_ticket(interaction, result_name, result_emoji):
-    guild = interaction.guild
-    user = interaction.user
-
-    if guild is None:
-        return None, "This only works inside a server."
-
-    category = guild.get_channel(GAME_CORNER_CATEGORY_ID)
-    staff_role = guild.get_role(STAFF_ROLE_ID)
-    bot_member = guild.me or guild.get_member(bot.user.id)
-
-    if category is None or not isinstance(category, discord.CategoryChannel):
-        return None, "Game Corner category not found or not a category."
-
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=False),
-        user: discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=True,
-            read_message_history=True
-        )
-    }
-
-    if bot_member is not None:
-        overwrites[bot_member] = discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=True,
-            read_message_history=True,
-            manage_channels=True
-        )
-
-    if staff_role is not None:
-        overwrites[staff_role] = discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=True,
-            read_message_history=True
-        )
-
-    try:
-        channel = await guild.create_text_channel(
-            name=f"slot-win-{clean_channel_name(user.name)}",
-            category=category,
-            overwrites=overwrites,
-            reason="Yapster2000 slot win ticket created"
-        )
-    except discord.Forbidden:
-        return None, "Missing Manage Channels permission."
-    except Exception as e:
-        return None, str(e)
-
-    embed = make_embed(
-        f"{result_emoji} Slot Win Ticket",
-        (
-            f"{user.mention} won **{result_name}**!\n\n"
-            "Send a pic of what car you want 🚗📸\n"
-            "Staff will sort your prize here."
-        ),
-        discord.Color.green()
-    )
-
-    embed.add_field(name="Winner", value=user.mention, inline=False)
-    embed.add_field(name="Prize", value=f"{result_emoji} {result_name}", inline=False)
-
-    await channel.send(
-        content=user.mention,
-        embed=embed,
-        view=CloseWinTicketView()
-    )
-
-    return channel, None
-
-
-class SlotView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(
-        label="🎰 Spin Slot Machine",
-        style=discord.ButtonStyle.green,
-        custom_id="yapster_spin_slot"
-    )
-    async def spin_slot(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user = interaction.user
-
-        if get_coin_count(user.id) < 1:
             await interaction.response.send_message(
-                "❌ You have no valid coins!\nCoins expire after **1 hour**.",
+                "❌ I do not have permission to create ticket channels.",
                 ephemeral=True
             )
             return
 
-        removed = remove_coins_from_user(user.id, 1)
+        await channel.send(f"{user.mention} welcome to your ticket!", view=CloseButton())
 
-        if not removed:
-            await interaction.response.send_message(
-                "❌ You have no valid coins!\nCoins expire after **1 hour**.",
-                ephemeral=True
-            )
-            return
-
-        await interaction.response.defer()
-
-        roll = random.randint(1, 100)
-        ticket_channel = None
-        ticket_error = None
-
-        if roll <= 70:
-            result = "Nothing"
-            emoji = "🚫"
-            message = "Maybe next time 😭"
-            color = discord.Color.red()
-
-        elif roll <= 94:
-            result = "Normal Cars"
-            emoji = "🚘"
-            message = "Not bad 🚘"
-            color = discord.Color.blue()
-            ticket_channel, ticket_error = await create_win_ticket(interaction, result, emoji)
-
-        elif roll <= 99:
-            result = "Hard Trade"
-            emoji = "✨"
-            message = "Nice pull ✨"
-            color = discord.Color.gold()
-            ticket_channel, ticket_error = await create_win_ticket(interaction, result, emoji)
-
-        else:
-            result = "Very Hard Trade"
-            emoji = "💎"
-            message = "🎰🎰💎🔥"
-            color = discord.Color.purple()
-            ticket_channel, ticket_error = await create_win_ticket(interaction, result, emoji)
-
-        balance = get_coin_count(user.id)
-
-        embed = make_embed("🎰 Slot Machine Result", message, color)
-        embed.add_field(name="Result", value=f"{emoji} {result}", inline=False)
-        embed.add_field(name="Coin Cost", value="1 coin", inline=True)
-        embed.add_field(name="Balance", value=f"{balance} valid coin(s)", inline=True)
-
-        if balance > 0:
-            embed.add_field(name="Next Coin Expires", value=get_next_expiry_text(user.id), inline=False)
-
-        if result != "Nothing":
-            if ticket_channel is not None:
-                embed.add_field(name="Win Ticket", value=ticket_channel.mention, inline=False)
-            else:
-                embed.add_field(name="Win Ticket", value=f"❌ Could not create ticket: {ticket_error}", inline=False)
-
-        await interaction.followup.send(embed=embed)
+        await interaction.response.send_message(f"✅ Created {channel.mention}", ephemeral=True)
 
 
-# ==================================================
-# READY EVENT
-# ==================================================
+# ---------------- READY ----------------
 @bot.event
 async def on_ready():
-    global VIEWS_ADDED
-
-    if not VIEWS_ADDED:
-        bot.add_view(TicketView())
-        bot.add_view(CloseTicketView())
-        bot.add_view(SlotView())
-        bot.add_view(CloseWinTicketView())
-        VIEWS_ADDED = True
+    bot.add_view(TicketButton())
+    bot.add_view(CloseButton())
 
     print("----------------------------")
-    print(f"🤖 Yapster2000 logged in as {bot.user}")
+    print(f"✅ Merged Bot logged in as {bot.user}")
     print("----------------------------")
 
+    if not bot.synced:
+        for guild in bot.guilds:
+            try:
+                bot.tree.copy_global_to(guild=guild)
+                await bot.tree.sync(guild=guild)
+                print(f"✅ Slash commands synced in {guild.name}")
+            except Exception as e:
+                print(f"❌ Slash sync failed in {guild.name}: {e}")
 
-# ==================================================
-# BOARD OF GUILT
-# ==================================================
+        bot.synced = True
+
+
+# ---------------- BOARD OF GUILT ----------------
 @bot.event
 async def on_member_remove(member):
     channel = bot.get_channel(LEAVES_CHANNEL_ID)
@@ -557,409 +519,513 @@ async def on_member_remove(member):
         print(f"❌ Leaves channel not found: {LEAVES_CHANNEL_ID}")
         return
 
-    embed = make_embed(
-        "⚖️ Board of Guilt",
-        (
-            f"💀 **{member.name}** left the server...\n\n"
+    embed = discord.Embed(
+        title="⚖️ Board of Guilt",
+        description=(
+            f"💀 {member.name} left the server...\n\n"
             "Their name shall stay here forever."
         ),
-        discord.Color.red()
+        color=discord.Color.red()
     )
 
     embed.add_field(name="Username", value=member.name, inline=True)
     embed.add_field(name="Display Name", value=member.display_name, inline=True)
     embed.add_field(name="User ID", value=str(member.id), inline=False)
+    embed.set_thumbnail(url=member.display_avatar.url)
 
-    if member.display_avatar:
-        embed.set_thumbnail(url=member.display_avatar.url)
-
-    await channel.send(
-        content=f"bye I guess... <@{member.id}>",
-        embed=embed
-    )
+    await channel.send(content=f"bye I guess... <@{member.id}>", embed=embed)
 
 
-# ==================================================
-# TICKET CLOSE EVENT
-# Gives exactly 1 coin when a Yapper ticket closes
-# ==================================================
+# ---------------- AUTO MODERATION ----------------
 @bot.event
-async def on_guild_channel_delete(channel):
-    channel_id = str(channel.id)
-
-    if channel_id not in tickets_store:
+async def on_message(message):
+    if message.author.bot:
         return
 
-    ticket_data = tickets_store[channel_id]
-    user_id = None
+    if message.guild is None:
+        return
 
-    if isinstance(ticket_data, dict):
-        user_id = ticket_data.get("user_id")
-    elif isinstance(ticket_data, str):
-        user_id = ticket_data
+    member = message.author
 
-    if user_id:
-        add_coins_to_user(user_id, 1)
-        print(f"Ticket closed. Added exactly 1 coin to user ID {user_id}.")
+    if member.guild_permissions.administrator or member.guild_permissions.manage_messages:
+        await bot.process_commands(message)
+        return
 
-    del tickets_store[channel_id]
-    save_tickets()
+    content = message.content
+    offence = detect_offence(content)
 
+    if offence is None:
+        if is_spam(member.id, content):
+            offence = "Spam / repeated messages"
 
-# ==================================================
-# YAPPER COMMANDS
-# ==================================================
-@bot.command(name="ticket")
-@commands.has_permissions(administrator=True)
-async def ticket_panel(ctx):
-    embed = make_embed(
-        "🎟️ Ticket Machine",
-        "Click the button below to create a ticket.",
-        discord.Color.green()
-    )
+    if offence is not None:
+        warning_count = add_warning(member.id)
 
-    await ctx.send(embed=embed, view=TicketView())
-    await delete_command(ctx)
-
-
-@bot.command(name="ping")
-async def ping(ctx):
-    await ctx.send("🏓 Yapster2000 is alive!")
-
-
-# ==================================================
-# SLOTY COMMANDS
-# ==================================================
-@bot.command(name="slotpanel")
-@commands.has_permissions(administrator=True)
-async def slot_panel(ctx):
-    embed = make_embed(
-        "🎰 Slot Machine",
-        (
-            "Click the button below to spin.\n\n"
-            "**Chances:**\n"
-            "🚫 Nothing — **70%**\n"
-            "🚘 Normal Cars — **24%**\n"
-            "✨ Hard Trade — **5%**\n"
-            "💎 Very Hard Trade — **1%**\n\n"
-            "Each spin costs **1 coin**.\n"
-            "Coins expire after **1 hour**.\n\n"
-            "Winning anything except **Nothing** opens a win ticket."
-        ),
-        discord.Color.green()
-    )
-
-    await ctx.send(embed=embed, view=SlotView())
-    await delete_command(ctx)
-
-
-@bot.command(name="coins", aliases=["balance", "bal"])
-async def coins_command(ctx, target: str = None):
-    if target is None:
-        member = ctx.author
-    else:
-        member = await find_member(ctx, target)
-
-        if member is None:
-            await ctx.send("❌ I could not find that user. Try mentioning them or using their user ID.")
-            return
-
-    balance = get_coin_count(member.id)
-    expiry_text = get_next_expiry_text(member.id)
-
-    await ctx.send(
-        f"🪙 {member.mention} has **{balance}** valid coin(s).\n"
-        f"⏰ Next coin expires: **{expiry_text}**"
-    )
-
-
-@bot.command(name="addcoins", aliases=["givecoins"])
-@commands.has_permissions(administrator=True)
-async def addcoins_command(ctx, *args):
-    if len(args) == 1:
         try:
-            amount = int(args[0])
-            member = ctx.author
+            await message.delete()
+        except discord.Forbidden:
+            await message.channel.send("❌ I need Manage Messages permission.")
         except Exception:
-            await ctx.send("❌ Usage: `!addcoins 5` or `!addcoins @user 5`")
-            return
+            pass
 
-    elif len(args) >= 2:
-        # Supports both:
-        # !addcoins @user 5
-        # !addcoins 5 @user
-        if args[0].isdigit():
-            amount = int(args[0])
-            target = args[1]
-        else:
-            target = args[0]
+        if warning_count >= MAX_WARNINGS:
+            punishment = "Banned" if PUNISHMENT_ON_MAX_WARNINGS.lower() == "ban" else "Kicked"
+
+            await send_wall_log(
+                member=member,
+                offence=offence,
+                punishment=punishment,
+                message_content=content,
+                warning_count=warning_count
+            )
+
             try:
-                amount = int(args[1])
-            except Exception:
-                await ctx.send("❌ Usage: `!addcoins 5 @user` or `!addcoins @user 5`")
-                return
+                await punish_if_needed(message.guild, message.channel, member, offence, warning_count)
+            except discord.Forbidden:
+                await message.channel.send(f"❌ I do not have permission to punish {member.mention}.")
+            except Exception as e:
+                print(e)
+                await message.channel.send("❌ Something went wrong while punishing.")
 
-        member = await find_member(ctx, target)
-
-        if member is None:
-            await ctx.send("❌ I could not find that user. Try mentioning them or using their user ID.")
             return
 
-    else:
-        await ctx.send("❌ Usage: `!addcoins 5` or `!addcoins @user 5`")
+        await send_wall_log(
+            member=member,
+            offence=offence,
+            punishment="Warning",
+            message_content=content,
+            warning_count=warning_count
+        )
+
+        await message.channel.send(
+            f"⚠️ {member.mention}, warning *{warning_count}/{MAX_WARNINGS}* — {offence}.\n"
+            "Your message was deleted."
+        )
+
         return
 
-    if amount <= 0:
-        await ctx.send("❌ Amount must be bigger than 0.")
-        return
+    await bot.process_commands(message)
 
-    add_coins_to_user(member.id, amount)
 
-    await ctx.send(
-        f"✅ Added **{amount}** coin(s) to {member.mention}.\n"
-        f"⏰ These coins expire in **1 hour**."
+# ---------------- YAPPER COMMANDS ----------------
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def ticket(ctx):
+    embed = discord.Embed(
+        title="🎫 Ticket Machine",
+        description="Click the button below to create a ticket.",
+        color=discord.Color.green()
     )
 
-    await delete_command(ctx)
+    await ctx.send(embed=embed, view=TicketButton())
 
 
-@bot.command(name="removecoins", aliases=["takecoins"])
+@bot.command()
 @commands.has_permissions(administrator=True)
-async def removecoins_command(ctx, *args):
-    if len(args) == 1:
-        try:
-            amount = int(args[0])
-            member = ctx.author
-        except Exception:
-            await ctx.send("❌ Usage: `!removecoins 5` or `!removecoins @user 5`")
+async def setcategory(ctx, category_id: int = None):
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+
+    if category_id is None:
+        if ctx.channel.category is None:
+            await ctx.send("❌ This channel is not inside a category. Use !setcategory CATEGORY_ID.")
             return
 
-    elif len(args) >= 2:
-        if args[0].isdigit():
-            amount = int(args[0])
-            target = args[1]
-        else:
-            target = args[0]
-            try:
-                amount = int(args[1])
-            except Exception:
-                await ctx.send("❌ Usage: `!removecoins 5 @user` or `!removecoins @user 5`")
-                return
+        category = ctx.channel.category
 
-        member = await find_member(ctx, target)
+    else:
+        category = ctx.guild.get_channel(category_id)
 
-        if member is None:
-            await ctx.send("❌ I could not find that user. Try mentioning them or using their user ID.")
+        if not isinstance(category, discord.CategoryChannel):
+            await ctx.send("❌ That ID is not a valid category in this server.")
             return
 
-    else:
-        await ctx.send("❌ Usage: `!removecoins 5` or `!removecoins @user 5`")
-        return
+    yapper_settings[str(ctx.guild.id)] = category.id
+    save_yapper_settings()
 
-    if amount <= 0:
-        await ctx.send("❌ Amount must be bigger than 0.")
-        return
-
-    success = remove_coins_from_user(member.id, amount)
-
-    if success:
-        await ctx.send(f"✅ Removed **{amount}** coin(s) from {member.mention}.")
-    else:
-        await ctx.send(f"❌ {member.mention} does not have enough valid coins.")
-
-    await delete_command(ctx)
+    await ctx.send(f"✅ Ticket category set to *{category.name}*.")
 
 
-# ==================================================
-# SALLY COMMANDS
-# ==================================================
-@bot.command(name="sallyspeak", aliases=["salyspeak", "say", "speak", "yap"])
+@bot.command()
 @commands.has_permissions(administrator=True)
-async def sallyspeak(ctx, *, message: str = None):
-    if message is None:
-        await ctx.send("❌ Usage: `!sallyspeak your message here`")
-        return
+async def checkcategory(ctx):
+    category = get_ticket_category(ctx.guild)
 
-    await ctx.send(message)
-    await delete_command(ctx)
-
-
-@bot.command(name="embed", aliases=["panel"])
-@commands.has_permissions(administrator=True)
-async def embed_command(ctx, *, text: str = None):
-    if text is None:
-        await ctx.send("❌ Usage: `!embed Title | Message here`")
-        return
-
-    if "|" in text:
-        title, body = text.split("|", 1)
+    if category is None:
+        await ctx.send("❌ No ticket category found.")
     else:
-        title = "📌 Info"
-        body = text
-
-    await ctx.send(embed=make_embed(title.strip(), body.strip()))
-    await delete_command(ctx)
+        await ctx.send(f"✅ Current ticket category: *{category.name}*")
 
 
-@bot.command(name="announce")
-@commands.has_permissions(administrator=True)
-async def announce(ctx, channel: discord.TextChannel = None, *, message: str = None):
-    if channel is None or message is None:
-        await ctx.send("❌ Usage: `!announce #channel message here`")
-        return
-
-    await channel.send(embed=make_embed("📢 Announcement", message))
-    await delete_command(ctx)
-
+# ---------------- SALLY COMMANDS ----------------
+@bot.command()
+async def sallyspeak(ctx, *, message):
     try:
-        await ctx.send(f"✅ Announcement sent to {channel.mention}", delete_after=5)
+        await ctx.message.delete()
     except Exception:
         pass
 
+    await ctx.send(message)
 
-@bot.command(name="slotinfo")
-@commands.has_permissions(administrator=True)
-async def slotinfo(ctx):
-    description = (
-        "Use your coins to spin the Sloty machine and try your luck 🍀\n\n"
-        "Each spin costs **1 coin**.\n\n"
-        "**Chances:**\n\n"
-        "🚫 **Nothing — 70%**\n"
-        "Maybe next time 🚫\n\n"
-        "🚘 **Normal Cars — 24%**\n"
-        "Not bad 🚘\n\n"
-        "✨ **Hard Trade — 5%**\n"
-        "Nice pull ✨\n\n"
-        "💎 **Very Hard Trade — 1%**\n"
-        "🎰🎰💎🔥\n\n"
-        "If you win anything except **Nothing**, a win ticket opens under **Game Corner**.\n\n"
-        "In the ticket, send a pic of what car you want so staff can sort your prize. 🚗📸\n\n"
-        "You’ll earn a coin when the trade is finished. 🎟️➡️🪙"
+
+@bot.command(name="embed")
+@commands.has_permissions(manage_messages=True)
+async def embed_command(ctx, title, *, description):
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
+
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=discord.Color.purple()
     )
 
-    await ctx.send(embed=make_embed("🎰 Slot Machine Info 🎰", description))
-    await delete_command(ctx)
+    await ctx.send(embed=embed)
 
 
-@bot.command(name="rules")
-@commands.has_permissions(administrator=True)
+@bot.command()
 async def rules(ctx):
-    description = (
-        "**1.** No BS.\n"
-        "**2.** No NSFW content.\n"
-        "**3.** Mods and the owner never go first in trades.\n"
-        "**4.** English only.\n"
-        "**5.** For DMO, payments must be made first.\n"
-        "**6.** Selling money drops or modded accounts will result in a permanent ban.\n"
-        "**7.** Do not promote your server outside the self-promo channel.\n"
-        "**8.** If you get timed out twice, you may be banned.\n"
-        "**9.** Do not waste staff time."
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
+
+    embed = discord.Embed(
+        title="📜 Server Rules 📜",
+        description=(
+            "1. No BS.\n"
+            "2. No NSFW.\n"
+            "3. English only.\n"
+            "4. No scams.\n"
+            "5. Respect staff.\n"
+            "6. Use tickets for trades.\n"
+            "7. No modded accounts.\n"
+            "8. No money services or boosts.\n"
+        ),
+        color=discord.Color.red()
     )
 
-    await ctx.send(embed=make_embed("📜 Rules", description, discord.Color.red()))
-    await delete_command(ctx)
+    await ctx.send(embed=embed)
 
 
-@bot.command(name="carinfo", aliases=["cars", "vehicleinfo"])
+@bot.command()
+async def slotinfo(ctx):
+    await ctx.send("❌ Sloty has been removed from this bot.")
+
+
+# ---------------- GIVEAWAY COMMANDS ----------------
+def make_prize(amount, prize_type):
+    prize_type = prize_type.lower().strip()
+
+    if prize_type == "normal":
+        prize = f"🚘 {amount} Normal Car"
+        if amount != 1:
+            prize += "s"
+        return prize
+
+    if prize_type == "hard trade":
+        prize = f"✨ {amount} Hard Trade"
+        if amount != 1:
+            prize += "s"
+        return prize
+
+    if prize_type == "very hard trade":
+        prize = f"💎 {amount} Very Hard Trade"
+        if amount != 1:
+            prize += "s"
+        return prize
+
+    return None
+
+
+async def start_giveaway(ctx, prize, seconds, test=False):
+    title = "🎉 TEST GIVEAWAY 🎉" if test else "🎉 GIVEAWAY 🎉"
+    time_text = "30 seconds" if test else "24 hours"
+
+    embed = discord.Embed(
+        title=title,
+        description=(
+            f"Prize: **{prize}**\n\n"
+            "React with 🎉 to enter!\n\n"
+            f"⏰ Ends in *{time_text}*"
+        ),
+        color=discord.Color.gold()
+    )
+
+    message = await ctx.send(embed=embed)
+    await message.add_reaction("🎉")
+
+    await asyncio.sleep(seconds)
+
+    try:
+        message = await ctx.channel.fetch_message(message.id)
+    except Exception:
+        await ctx.send("❌ Giveaway message was deleted or could not be found.")
+        return
+
+    entries = []
+
+    for reaction in message.reactions:
+        if str(reaction.emoji) == "🎉":
+            async for user in reaction.users():
+                if not user.bot:
+                    entries.append(user)
+
+    if len(entries) == 0:
+        await ctx.send(f"❌ No one entered the *{prize}* giveaway.")
+        return
+
+    winner = random.choice(entries)
+
+    end_embed = discord.Embed(
+        title="🎉 GIVEAWAY ENDED 🎉",
+        description=(
+            f"Prize: **{prize}**\n\n"
+            f"Winner: {winner.mention}"
+        ),
+        color=discord.Color.green()
+    )
+
+    await ctx.send(embed=end_embed)
+    await ctx.send(f"🎉 Congratulations {winner.mention}! You won *{prize}*!")
+
+
+@bot.command(name="giveaway")
 @commands.has_permissions(administrator=True)
-async def carinfo(ctx):
-    description = (
-        "All vehicles are clean unless stated otherwise.\n\n"
-        "**This includes:**\n"
-        "• Body colour\n"
-        "• Rim colour\n"
-        "• Window tint\n"
-        "• Trim\n"
-        "• Accent colour\n\n"
-        "If something is scratched, let me know and I’ll replace it with no problem.\n\n"
-        "**Note:** tyre smoke and horns are not checked.\n\n"
-        "🎟️ To trade, please create a ticket."
-    )
+async def giveaway(ctx, amount: int, *, prize_type):
+    if amount <= 0:
+        await ctx.send("❌ Amount must be at least 1.")
+        return
 
-    await ctx.send(embed=make_embed("🚗 Vehicle Condition Info", description))
-    await delete_command(ctx)
+    prize = make_prize(amount, prize_type)
+
+    if prize is None:
+        await ctx.send(
+            "❌ Use:\n"
+            "`!giveaway 4 Normal`\n"
+            "`!giveaway 5 Hard Trade`\n"
+            "!giveaway 2 Very Hard Trade"
+        )
+        return
+
+    await start_giveaway(ctx, prize, GIVEAWAY_TIME)
 
 
-@bot.command(name="heistinfo", aliases=["heists", "heist"])
+@bot.command(name="testgiveaway")
 @commands.has_permissions(administrator=True)
-async def heistinfo(ctx):
-    description = (
-        "Heist payments are only available during these times:\n\n"
-        "• **Tuesday:** 12 PM – 4 PM UK time\n"
-        "• **Thursday:** 12 PM – 4 PM UK time\n\n"
-        "Outside these times, please use another payment method."
+async def testgiveaway(ctx, amount: int, *, prize_type):
+    if amount <= 0:
+        await ctx.send("❌ Amount must be at least 1.")
+        return
+
+    prize = make_prize(amount, prize_type)
+
+    if prize is None:
+        await ctx.send("❌ Use: !testgiveaway 1 Normal")
+        return
+
+    await start_giveaway(ctx, prize, TEST_GIVEAWAY_TIME, test=True)
+
+
+# ---------------- KNOB COMMANDS ----------------
+@bot.command(name="warn")
+@commands.has_permissions(manage_messages=True)
+async def prefix_warn(ctx, member: discord.Member, *, reason):
+    warning_count = add_warning(member.id)
+
+    await send_wall_log(
+        member=member,
+        offence=reason,
+        punishment="Manual warning",
+        message_content="Manual staff warning",
+        warning_count=warning_count,
+        moderator=ctx.author
     )
 
-    await ctx.send(embed=make_embed("💰 Heist Payment Availability", description))
-    await delete_command(ctx)
+    await ctx.send(
+        f"⚠️ {member.mention} has been warned by {ctx.author.mention}.\n"
+        f"Reason: **{reason}**\n"
+        f"Warnings: *{warning_count}/{MAX_WARNINGS}*"
+    )
+
+    if warning_count >= MAX_WARNINGS:
+        punishment = "Banned" if PUNISHMENT_ON_MAX_WARNINGS.lower() == "ban" else "Kicked"
+
+        await send_wall_log(
+            member=member,
+            offence=reason,
+            punishment=punishment,
+            message_content="Reached max warnings from manual warning",
+            warning_count=warning_count,
+            moderator=ctx.author
+        )
+
+        await punish_if_needed(ctx.guild, ctx.channel, member, reason, warning_count)
 
 
-# ==================================================
-# HELP / TEST COMMANDS
-# ==================================================
+@bot.command(name="warnings")
+@commands.has_permissions(manage_messages=True)
+async def warnings(ctx, member: discord.Member = None):
+    if member is None:
+        member = ctx.author
+
+    count = get_warnings(member.id)
+    await ctx.send(f"⚠️ {member.mention} has *{count}/{MAX_WARNINGS}* warnings.")
+
+
+@bot.command(name="clearwarnings")
+@commands.has_permissions(manage_messages=True)
+async def clearwarnings(ctx, member: discord.Member):
+    clear_warnings(member.id)
+    await ctx.send(f"✅ Cleared warnings for {member.mention}.")
+
+
+@bot.command(name="knobstatus")
+@commands.has_permissions(manage_messages=True)
+async def knobstatus(ctx):
+    banned_list = "\n".join(f"- {phrase}" for phrase in BANNED_PHRASES)
+
+    embed = discord.Embed(
+        title="🔨 Knob Bot Status",
+        description=(
+            "Knob moderation is active.\n\n"
+            f"Punishment: **{PUNISHMENT_ON_MAX_WARNINGS.title()} after {MAX_WARNINGS} warnings**\n"
+            "Bad messages are automatically deleted.\n"
+            "Sales, car trading, and Discord links are allowed.\n\n"
+            "**Banned phrases:**\n"
+            f"{banned_list[:3500]}"
+        ),
+        color=discord.Color.red()
+    )
+
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="manualwall")
+@commands.has_permissions(manage_messages=True)
+async def manualwall(ctx, member: discord.Member, *, offence):
+    warning_count = add_warning(member.id)
+
+    await send_wall_log(
+        member=member,
+        offence=offence,
+        punishment="Manual warning",
+        message_content="Manual staff report",
+        warning_count=warning_count,
+        moderator=ctx.author
+    )
+
+    await ctx.send(f"🧱 Added {member.mention} to the Wall of Knobs.")
+
+
 @bot.command(name="testguilt")
+@commands.has_permissions(administrator=True)
 async def testguilt(ctx):
     await ctx.send("⚖️ Board of Guilt is alive. Nobody is safe.")
 
 
-@bot.command(name="yapsterhelp", aliases=["help"])
-async def yapsterhelp(ctx):
-    help_text = (
-        "**🤖 Yapster2000 Commands**\n\n"
-        "**Yapper**\n"
-        "`!ticket` — send ticket panel\n\n"
-        "**Sloty**\n"
-        "`!slotpanel` — send slot machine panel\n"
-        "`!coins` — check your coins\n"
-        "`!coins @user` — check another user\n"
-        "`!addcoins 5` — add coins to yourself\n"
-        "`!addcoins @user 5` — add coins to user\n"
-        "`!removecoins @user 5` — remove coins\n\n"
-        "**Sally**\n"
-        "`!sallyspeak message` — bot says your message\n"
-        "`!embed Title | Message` — clean embed\n"
-        "`!announce #channel message` — announce in channel\n"
-        "`!slotinfo` — slot info panel\n"
-        "`!rules` — rules panel\n"
-        "`!carinfo` — car info panel\n"
-        "`!heistinfo` — heist info panel\n\n"
-        "**Board of Guilt**\n"
-        "`!testguilt` — test command\n"
-        "Leaving users are logged automatically."
+# ---------------- SLASH WARN ----------------
+@bot.tree.command(name="warn", description="Manually warn a member")
+@app_commands.describe(
+    member="The member to warn",
+    reason="The reason for the warning"
+)
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_warn(interaction: discord.Interaction, member: discord.Member, reason: str):
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+
+    warning_count = add_warning(member.id)
+
+    await send_wall_log(
+        member=member,
+        offence=reason,
+        punishment="Manual warning",
+        message_content="Manual slash warning",
+        warning_count=warning_count,
+        moderator=interaction.user
     )
 
-    await ctx.send(help_text)
+    await interaction.response.send_message(
+        f"⚠️ {member.mention} has been warned by {interaction.user.mention}.\n"
+        f"Reason: **{reason}**\n"
+        f"Warnings: *{warning_count}/{MAX_WARNINGS}*"
+    )
+
+    if warning_count >= MAX_WARNINGS:
+        punishment = "Banned" if PUNISHMENT_ON_MAX_WARNINGS.lower() == "ban" else "Kicked"
+
+        await send_wall_log(
+            member=member,
+            offence=reason,
+            punishment=punishment,
+            message_content="Reached max warnings from slash warning",
+            warning_count=warning_count,
+            moderator=interaction.user
+        )
+
+        await punish_if_needed(interaction.guild, interaction.channel, member, reason, warning_count)
 
 
-# ==================================================
-# ERROR HANDLING
-# ==================================================
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message(
+            "❌ You need Manage Messages permission to use this command.",
+            ephemeral=True
+        )
+        return
+
+    print(error)
+
+    if interaction.response.is_done():
+        await interaction.followup.send("❌ Something went wrong. Check Railway logs.", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ Something went wrong. Check Railway logs.", ephemeral=True)
+
+
+# ---------------- PREFIX ERROR HANDLER ----------------
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         return
 
     if isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ You do not have permission.")
+        await ctx.send("❌ You do not have permission to use that command.")
+        return
+
+    if isinstance(error, commands.MemberNotFound):
+        await ctx.send("❌ I could not find that member.")
         return
 
     if isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send("❌ Missing something. Try `!yapsterhelp`.")
+        await ctx.send(
+            "❌ Missing info. Examples:\n"
+            "`!ticket`\n"
+            "`!giveaway 4 Normal`\n"
+            "`!sallyspeak message`\n"
+            "`!warn @user reason`\n"
+            "`!warnings @user`\n"
+            "!clearwarnings @user"
+        )
         return
 
     if isinstance(error, commands.BadArgument):
-        await ctx.send("❌ Bad input. Try `!yapsterhelp`.")
+        await ctx.send("❌ Bad command format. Check the number/user you typed.")
         return
 
     print(error)
     await ctx.send("❌ Something went wrong. Check Railway logs.")
 
 
-# ==================================================
-# RUN BOT
-# ==================================================
-if not TOKEN:
-    print("❌ Token not found.")
-    print("Add a Railway variable named TOKENS or TOKEN5 with your bot token.")
+# ---------------- RUN BOT ----------------
+token = os.getenv(TOKEN_NAME)
+
+if token is None:
+    print(f"❌ {TOKEN_NAME} not found in Railway variables.")
 else:
-    bot.run(TOKEN)
+    bot.run(token)
