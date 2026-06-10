@@ -8,9 +8,13 @@ import time
 import random
 import asyncio
 from collections import defaultdict
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 
 # ---------------- TOKEN ----------------
 TOKEN_NAME = "TOKEN"
+
 
 # ---------------- IDS ----------------
 
@@ -26,13 +30,29 @@ TICKET_CATEGORY_IDS = [
 LEAVES_CHANNEL_ID = 1475079442291363901
 WALL_CHANNEL_ID = 1509103133479932085
 
+OWNER_USER_ID = 1137385938155221073
+
+
 # ---------------- FILES ----------------
 YAPPER_SETTINGS_FILE = "yapper_settings.json"
 WARNINGS_FILE = "knob_warnings.json"
+TICKET_OWNERS_FILE = "ticket_owners.json"
+
 
 # ---------------- GIVEAWAY SETTINGS ----------------
 GIVEAWAY_TIME = 24 * 60 * 60
 TEST_GIVEAWAY_TIME = 30
+
+
+# ---------------- TICKET AUTO MESSAGE SETTINGS ----------------
+UK_TIMEZONE = ZoneInfo("Europe/London")
+AVAILABLE_START_HOUR = 9
+AVAILABLE_END_HOUR = 22
+
+TICKET_DM_COOLDOWN = 60 * 60
+AWAY_AUTO_REPLY_COOLDOWN = 60 * 60
+AWAY_AUTO_REPLY_DELETE_AFTER = 5 * 60
+
 
 # ---------------- MODERATION SETTINGS ----------------
 MAX_WARNINGS = 3
@@ -153,6 +173,7 @@ BANNED_PHRASES = [
     "mod menu services",
 ]
 
+
 # ---------------- INTENTS ----------------
 intents = discord.Intents.default()
 intents.message_content = True
@@ -165,25 +186,27 @@ bot = commands.Bot(command_prefix=["!", "?"], intents=intents)
 recent_messages = defaultdict(list)
 bot.synced = False
 
+
 # ---------------- JSON HELPERS ----------------
 def load_json(file_name, default):
     if not os.path.exists(file_name):
         return default
 
     try:
-        with open(file_name, "r") as file:
+        with open(file_name, "r", encoding="utf-8") as file:
             return json.load(file)
     except Exception:
         return default
 
 
 def save_json(file_name, data):
-    with open(file_name, "w") as file:
+    with open(file_name, "w", encoding="utf-8") as file:
         json.dump(data, file, indent=4)
 
 
 yapper_settings = load_json(YAPPER_SETTINGS_FILE, {})
 warnings_store = load_json(WARNINGS_FILE, {})
+ticket_owners = load_json(TICKET_OWNERS_FILE, {})
 
 
 def save_yapper_settings():
@@ -194,16 +217,29 @@ def save_warnings():
     save_json(WARNINGS_FILE, warnings_store)
 
 
+def save_ticket_owners():
+    save_json(TICKET_OWNERS_FILE, ticket_owners)
+
+
 # ---------------- TICKET HELPERS ----------------
 def get_ticket_category(guild):
     guild_id = str(guild.id)
 
-    if guild_id in yapper_settings:
-        saved_category_id = int(yapper_settings[guild_id])
-        category = guild.get_channel(saved_category_id)
+    saved_data = yapper_settings.get(guild_id)
 
-        if isinstance(category, discord.CategoryChannel):
-            return category
+    if saved_data:
+        try:
+            if isinstance(saved_data, dict):
+                saved_category_id = int(saved_data.get("ticket_category_id"))
+            else:
+                saved_category_id = int(saved_data)
+
+            category = guild.get_channel(saved_category_id)
+
+            if isinstance(category, discord.CategoryChannel):
+                return category
+        except Exception:
+            pass
 
     for category_id in TICKET_CATEGORY_IDS:
         category = guild.get_channel(category_id)
@@ -219,6 +255,13 @@ def clean_channel_name(name):
     name = re.sub(r"[^a-z0-9-]", "-", name)
     name = re.sub(r"-+", "-", name)
     return name.strip("-")[:40]
+
+
+def is_fily_offline_hours():
+    now_uk = datetime.now(UK_TIMEZONE)
+    hour = now_uk.hour
+
+    return hour < AVAILABLE_START_HOUR or hour >= AVAILABLE_END_HOUR
 
 
 # ---------------- WARNING HELPERS ----------------
@@ -335,7 +378,7 @@ async def send_wall_log(member, offence, punishment, message_content, warning_co
 
     if message_content:
         safe_message = message_content[:900]
-        embed.add_field(name="Message", value=f"```{safe_message}```", inline=False)
+        embed.add_field(name="Message", value=safe_message, inline=False)
 
     embed.set_thumbnail(url=member.display_avatar.url)
 
@@ -361,16 +404,15 @@ async def punish_if_needed(guild, channel, member, offence, warning_count):
     if PUNISHMENT_ON_MAX_WARNINGS.lower() == "ban":
         try:
             await member.send(
-                f"🔨 You were banned from *{guild.name}*.\n"
-                f"Reason: **{offence}**\n"
-                f"You reached *{MAX_WARNINGS} warnings*."
+                f"🔨 You were banned from {guild.name}.\n"
+                f"Reason: {offence}\n"
+                f"You reached {MAX_WARNINGS} warnings."
             )
         except Exception:
             pass
 
         await member.ban(
-            reason=f"Reached {MAX_WARNINGS} warnings. Last offence: {offence}",
-            delete_message_days=0
+            reason=f"Reached {MAX_WARNINGS} warnings. Last offence: {offence}"
         )
 
         clear_warnings(member.id)
@@ -378,9 +420,9 @@ async def punish_if_needed(guild, channel, member, offence, warning_count):
 
     try:
         await member.send(
-            f"🔨 You were kicked from *{guild.name}*.\n"
-            f"Reason: **{offence}**\n"
-            f"You reached *{MAX_WARNINGS} warnings*."
+            f"🔨 You were kicked from {guild.name}.\n"
+            f"Reason: {offence}\n"
+            f"You reached {MAX_WARNINGS} warnings."
         )
     except Exception:
         pass
@@ -404,8 +446,20 @@ class CloseButton(discord.ui.View):
         custom_id="merged_close_ticket"
     )
     async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel_id = str(interaction.channel.id)
+
+        if channel_id in ticket_owners:
+            del ticket_owners[channel_id]
+            save_ticket_owners()
+
         await interaction.response.send_message("Closing ticket...", ephemeral=True)
-        await interaction.channel.delete()
+
+        await asyncio.sleep(2)
+
+        try:
+            await interaction.channel.delete()
+        except Exception:
+            pass
 
 
 class TicketButton(discord.ui.View):
@@ -413,7 +467,7 @@ class TicketButton(discord.ui.View):
         super().__init__(timeout=None)
 
     @discord.ui.button(
-        label="🎫 Create Ticket",
+        label="🎟️ Open Ticket",
         style=discord.ButtonStyle.green,
         custom_id="merged_create_ticket"
     )
@@ -446,12 +500,14 @@ class TicketButton(discord.ui.View):
                 view_channel=True,
                 send_messages=True,
                 read_message_history=True,
-                manage_channels=True
+                manage_channels=True,
+                manage_messages=True
             )
         }
 
         for role_id in STAFF_ROLE_IDS:
             role = guild.get_role(role_id)
+
             if role is not None:
                 overwrites[role] = discord.PermissionOverwrite(
                     view_channel=True,
@@ -483,7 +539,35 @@ class TicketButton(discord.ui.View):
             )
             return
 
-        await channel.send(f"{user.mention} welcome to your ticket!", view=CloseButton())
+        ticket_owners[str(channel.id)] = {
+            "owner_id": user.id,
+            "last_dm_time": 0,
+            "last_away_reply_time": 0
+        }
+        save_ticket_owners()
+
+        ticket_embed = discord.Embed(
+            title="🎟️ Ticket Opened",
+            description=(
+                "Please explain what you need help with.\n\n"
+                "*Availability Times:* 9am to 10pm UK"
+            ),
+            color=discord.Color.green()
+        )
+
+        await channel.send(
+            content=f"{user.mention}",
+            embed=ticket_embed,
+            view=CloseButton()
+        )
+
+        try:
+            await user.send(
+                f"🎫 Your ticket has been created in *{guild.name}*.\n"
+                f"Ticket: {channel.mention}"
+            )
+        except Exception:
+            pass
 
         await interaction.response.send_message(f"✅ Created {channel.mention}", ephemeral=True)
 
@@ -536,6 +620,103 @@ async def on_member_remove(member):
     await channel.send(content=f"bye I guess... <@{member.id}>", embed=embed)
 
 
+# ---------------- TICKET AUTO MESSAGES ----------------
+async def delete_message_later(message, seconds):
+    await asyncio.sleep(seconds)
+
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
+async def maybe_dm_ticket_owner(message):
+    channel_id = str(message.channel.id)
+
+    if channel_id not in ticket_owners:
+        return
+
+    data = ticket_owners[channel_id]
+    owner_id = int(data.get("owner_id", 0))
+
+    # Do not DM the owner if they are the one replying
+    if owner_id == message.author.id:
+        return
+
+    # Only your replies trigger the DM
+    if message.author.id != OWNER_USER_ID:
+        return
+
+    now = time.time()
+    last_dm_time = float(data.get("last_dm_time", 0))
+
+    # Only DM once per hour per ticket
+    if now - last_dm_time < TICKET_DM_COOLDOWN:
+        return
+
+    owner = message.guild.get_member(owner_id)
+
+    if owner is None:
+        try:
+            owner = await message.guild.fetch_member(owner_id)
+        except Exception:
+            return
+
+    try:
+        await owner.send(
+            f"📩 **Ticket Update**\n\n"
+            f"{message.author.display_name} has replied to your ticket in *{message.guild.name}*.\n\n"
+            f"Ticket: {message.channel.mention}\n\n"
+            "Please check it when you can."
+        )
+
+        data["last_dm_time"] = now
+        ticket_owners[channel_id] = data
+        save_ticket_owners()
+
+    except Exception:
+        pass
+
+
+async def maybe_send_away_auto_reply(message):
+    channel_id = str(message.channel.id)
+
+    if channel_id not in ticket_owners:
+        return
+
+    data = ticket_owners[channel_id]
+    owner_id = int(data.get("owner_id", 0))
+
+    # Only auto-reply when the ticket owner sends a message
+    if message.author.id != owner_id:
+        return
+
+    # Only outside 9am to 10pm UK
+    if not is_fily_offline_hours():
+        return
+
+    now = time.time()
+    last_away_reply_time = float(data.get("last_away_reply_time", 0))
+
+    # Cooldown, not an automatic timer
+    if now - last_away_reply_time < AWAY_AUTO_REPLY_COOLDOWN:
+        return
+
+    away_msg = await message.channel.send(
+        f"{message.author.mention}\n"
+        "⏰ **Fily is currently offline.**\n\n"
+        "Available hours are *9:00 AM - 10:00 PM UK time*.\n"
+        "He’ll reply when he’s back online.",
+        allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False)
+    )
+
+    data["last_away_reply_time"] = now
+    ticket_owners[channel_id] = data
+    save_ticket_owners()
+
+    asyncio.create_task(delete_message_later(away_msg, AWAY_AUTO_REPLY_DELETE_AFTER))
+
+
 # ---------------- AUTO MODERATION ----------------
 @bot.event
 async def on_message(message):
@@ -544,6 +725,9 @@ async def on_message(message):
 
     if message.guild is None:
         return
+
+    await maybe_dm_ticket_owner(message)
+    await maybe_send_away_auto_reply(message)
 
     member = message.author
 
@@ -598,7 +782,7 @@ async def on_message(message):
         )
 
         await message.channel.send(
-            f"⚠️ {member.mention}, warning *{warning_count}/{MAX_WARNINGS}* — {offence}.\n"
+            f"⚠️ {member.mention}, warning {warning_count}/{MAX_WARNINGS} — {offence}.\n"
             "Your message was deleted."
         )
 
@@ -612,8 +796,11 @@ async def on_message(message):
 @commands.has_permissions(administrator=True)
 async def ticket(ctx):
     embed = discord.Embed(
-        title="🎫 Ticket Machine",
-        description="Click the button below to create a ticket.",
+        title="🎟️ Open a Ticket to Trade",
+        description=(
+            "Click the button below to open a ticket.\n\n"
+            "*Availability Times:* 9am to 10pm UK"
+        ),
         color=discord.Color.green()
     )
 
@@ -637,14 +824,14 @@ async def setcategory(ctx, category_id: int = None):
     else:
         category = ctx.guild.get_channel(category_id)
 
-        if not isinstance(category, discord.CategoryChannel):
-            await ctx.send("❌ That ID is not a valid category in this server.")
-            return
+    if not isinstance(category, discord.CategoryChannel):
+        await ctx.send("❌ That ID is not a valid category in this server.")
+        return
 
     yapper_settings[str(ctx.guild.id)] = category.id
     save_yapper_settings()
 
-    await ctx.send(f"✅ Ticket category set to *{category.name}*.")
+    await ctx.send(f"✅ Ticket category set to {category.name}.")
 
 
 @bot.command()
@@ -655,7 +842,7 @@ async def checkcategory(ctx):
     if category is None:
         await ctx.send("❌ No ticket category found.")
     else:
-        await ctx.send(f"✅ Current ticket category: *{category.name}*")
+        await ctx.send(f"✅ Current ticket category: {category.name}")
 
 
 # ---------------- SALLY COMMANDS ----------------
@@ -748,9 +935,9 @@ async def start_giveaway(ctx, prize, seconds, test=False):
     embed = discord.Embed(
         title=title,
         description=(
-            f"Prize: **{prize}**\n\n"
+            f"Prize: {prize}\n\n"
             "React with 🎉 to enter!\n\n"
-            f"⏰ Ends in *{time_text}*"
+            f"⏰ Ends in {time_text}"
         ),
         color=discord.Color.gold()
     )
@@ -775,7 +962,7 @@ async def start_giveaway(ctx, prize, seconds, test=False):
                     entries.append(user)
 
     if len(entries) == 0:
-        await ctx.send(f"❌ No one entered the *{prize}* giveaway.")
+        await ctx.send(f"❌ No one entered the {prize} giveaway.")
         return
 
     winner = random.choice(entries)
@@ -783,14 +970,14 @@ async def start_giveaway(ctx, prize, seconds, test=False):
     end_embed = discord.Embed(
         title="🎉 GIVEAWAY ENDED 🎉",
         description=(
-            f"Prize: **{prize}**\n\n"
+            f"Prize: {prize}\n\n"
             f"Winner: {winner.mention}"
         ),
         color=discord.Color.green()
     )
 
     await ctx.send(embed=end_embed)
-    await ctx.send(f"🎉 Congratulations {winner.mention}! You won *{prize}*!")
+    await ctx.send(f"🎉 Congratulations {winner.mention}! You won {prize}!")
 
 
 @bot.command(name="giveaway")
@@ -805,8 +992,8 @@ async def giveaway(ctx, amount: int, *, prize_type):
     if prize is None:
         await ctx.send(
             "❌ Use:\n"
-            "`!giveaway 4 Normal`\n"
-            "`!giveaway 5 Hard Trade`\n"
+            "!giveaway 4 Normal\n"
+            "!giveaway 5 Hard Trade\n"
             "!giveaway 2 Very Hard Trade"
         )
         return
@@ -847,8 +1034,8 @@ async def prefix_warn(ctx, member: discord.Member, *, reason):
 
     await ctx.send(
         f"⚠️ {member.mention} has been warned by {ctx.author.mention}.\n"
-        f"Reason: **{reason}**\n"
-        f"Warnings: *{warning_count}/{MAX_WARNINGS}*"
+        f"Reason: {reason}\n"
+        f"Warnings: {warning_count}/{MAX_WARNINGS}"
     )
 
     if warning_count >= MAX_WARNINGS:
@@ -873,7 +1060,7 @@ async def warnings(ctx, member: discord.Member = None):
         member = ctx.author
 
     count = get_warnings(member.id)
-    await ctx.send(f"⚠️ {member.mention} has *{count}/{MAX_WARNINGS}* warnings.")
+    await ctx.send(f"⚠️ {member.mention} has {count}/{MAX_WARNINGS} warnings.")
 
 
 @bot.command(name="clearwarnings")
@@ -892,10 +1079,10 @@ async def knobstatus(ctx):
         title="🔨 Knob Bot Status",
         description=(
             "Knob moderation is active.\n\n"
-            f"Punishment: **{PUNISHMENT_ON_MAX_WARNINGS.title()} after {MAX_WARNINGS} warnings**\n"
+            f"Punishment: {PUNISHMENT_ON_MAX_WARNINGS.title()} after {MAX_WARNINGS} warnings\n"
             "Bad messages are automatically deleted.\n"
             "Sales, car trading, and Discord links are allowed.\n\n"
-            "**Banned phrases:**\n"
+            "Banned phrases:\n"
             f"{banned_list[:3500]}"
         ),
         color=discord.Color.red()
@@ -952,8 +1139,8 @@ async def slash_warn(interaction: discord.Interaction, member: discord.Member, r
 
     await interaction.response.send_message(
         f"⚠️ {member.mention} has been warned by {interaction.user.mention}.\n"
-        f"Reason: **{reason}**\n"
-        f"Warnings: *{warning_count}/{MAX_WARNINGS}*"
+        f"Reason: {reason}\n"
+        f"Warnings: {warning_count}/{MAX_WARNINGS}"
     )
 
     if warning_count >= MAX_WARNINGS:
@@ -1005,11 +1192,11 @@ async def on_command_error(ctx, error):
     if isinstance(error, commands.MissingRequiredArgument):
         await ctx.send(
             "❌ Missing info. Examples:\n"
-            "`!ticket`\n"
-            "`!giveaway 4 Normal`\n"
-            "`!sallyspeak message`\n"
-            "`!warn @user reason`\n"
-            "`!warnings @user`\n"
+            "!ticket\n"
+            "!giveaway 4 Normal\n"
+            "!sallyspeak message\n"
+            "!warn @user reason\n"
+            "!warnings @user\n"
             "!clearwarnings @user"
         )
         return
