@@ -27,10 +27,20 @@ TICKET_CATEGORY_IDS = [
     1507876447467995226   # friend's server ticket category
 ]
 
+TICKET_OWNER_NAMES_BY_CATEGORY = {
+    1472860643475329096: "Filiy V",  # your server
+    1507876447467995226: "Mruss"     # friend's server
+}
+
+DEFAULT_TICKET_OWNER_NAME = "Filiy V"
+
 LEAVES_CHANNEL_ID = 1475079442291363901
 WALL_CHANNEL_ID = 1509103133479932085
 
-OWNER_USER_ID = 1137385938155221073
+# Your Discord ID. Your replies trigger the ticket-owner DM.
+OWNER_USER_IDS = [
+    1137385938155221073
+]
 
 
 # ---------------- FILES ----------------
@@ -262,6 +272,16 @@ def is_fily_offline_hours():
     hour = now_uk.hour
 
     return hour < AVAILABLE_START_HOUR or hour >= AVAILABLE_END_HOUR
+
+
+def get_ticket_owner_display_name(channel):
+    if channel.category is not None:
+        return TICKET_OWNER_NAMES_BY_CATEGORY.get(
+            channel.category.id,
+            DEFAULT_TICKET_OWNER_NAME
+        )
+
+    return DEFAULT_TICKET_OWNER_NAME
 
 
 # ---------------- WARNING HELPERS ----------------
@@ -644,7 +664,7 @@ async def maybe_dm_ticket_owner(message):
         return
 
     # Only your replies trigger the DM
-    if message.author.id != OWNER_USER_ID:
+    if message.author.id not in OWNER_USER_IDS:
         return
 
     now = time.time()
@@ -702,11 +722,13 @@ async def maybe_send_away_auto_reply(message):
     if now - last_away_reply_time < AWAY_AUTO_REPLY_COOLDOWN:
         return
 
+    owner_display_name = get_ticket_owner_display_name(message.channel)
+
     away_msg = await message.channel.send(
         f"{message.author.mention}\n"
-        "⏰ **Fily is currently offline.**\n\n"
+        f"⏰ **{owner_display_name} is currently offline.**\n\n"
         "Available hours are *9:00 AM - 10:00 PM UK time*.\n"
-        "He’ll reply when he’s back online.",
+        f"{owner_display_name} will reply when they’re back online.",
         allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False)
     )
 
