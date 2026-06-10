@@ -37,7 +37,7 @@ DEFAULT_TICKET_OWNER_NAME = "Filiy V"
 LEAVES_CHANNEL_ID = 1475079442291363901
 WALL_CHANNEL_ID = 1509103133479932085
 
-# Your Discord ID. Your replies trigger the ticket-owner DM.
+# Your Discord ID. Your replies trigger the ticket-owner DM for !tickets only.
 OWNER_USER_IDS = [
     1137385938155221073
 ]
@@ -275,6 +275,14 @@ def is_fily_offline_hours():
 
 
 def get_ticket_owner_display_name(channel):
+    channel_id = str(channel.id)
+    data = ticket_owners.get(channel_id)
+
+    if data:
+        saved_name = data.get("owner_display_name")
+        if saved_name:
+            return saved_name
+
     if channel.category is not None:
         return TICKET_OWNER_NAMES_BY_CATEGORY.get(
             channel.category.id,
@@ -282,6 +290,130 @@ def get_ticket_owner_display_name(channel):
         )
 
     return DEFAULT_TICKET_OWNER_NAME
+
+
+def ticket_auto_messages_enabled(channel):
+    data = ticket_owners.get(str(channel.id))
+
+    if not data:
+        return False
+
+    return bool(data.get("auto_messages", False))
+
+
+async def create_ticket_channel(interaction, auto_messages):
+    guild = interaction.guild
+    user = interaction.user
+
+    if guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+
+    category = get_ticket_category(guild)
+
+    if category is None:
+        await interaction.response.send_message(
+            "❌ Ticket category not found. Admin can use !setcategory CATEGORY_ID.",
+            ephemeral=True
+        )
+        return
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        user: discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+            attach_files=True
+        ),
+        guild.me: discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+            manage_channels=True,
+            manage_messages=True
+        )
+    }
+
+    for role_id in STAFF_ROLE_IDS:
+        role = guild.get_role(role_id)
+
+        if role is not None:
+            overwrites[role] = discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                attach_files=True
+            )
+
+    channel_name = f"ticket-{clean_channel_name(user.name)}"
+    existing = discord.utils.get(category.text_channels, name=channel_name)
+
+    if existing:
+        await interaction.response.send_message(
+            f"❌ You already have a ticket: {existing.mention}",
+            ephemeral=True
+        )
+        return
+
+    try:
+        channel = await guild.create_text_channel(
+            name=channel_name,
+            category=category,
+            overwrites=overwrites
+        )
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "❌ I do not have permission to create ticket channels.",
+            ephemeral=True
+        )
+        return
+
+    owner_display_name = TICKET_OWNER_NAMES_BY_CATEGORY.get(
+        category.id,
+        DEFAULT_TICKET_OWNER_NAME
+    )
+
+    ticket_owners[str(channel.id)] = {
+        "owner_id": user.id,
+        "last_dm_time": 0,
+        "last_away_reply_time": 0,
+        "auto_messages": auto_messages,
+        "owner_display_name": owner_display_name
+    }
+    save_ticket_owners()
+
+    if auto_messages:
+        ticket_embed = discord.Embed(
+            title="🎟️ Ticket Opened",
+            description=(
+                "Please explain what you need help with.\n\n"
+                "*Availability Times:* 9am to 10pm UK"
+            ),
+            color=discord.Color.green()
+        )
+    else:
+        ticket_embed = discord.Embed(
+            title="🎫 Ticket Opened",
+            description="Please explain what you need help with.",
+            color=discord.Color.green()
+        )
+
+    await channel.send(
+        content=f"{user.mention}",
+        embed=ticket_embed,
+        view=CloseButton()
+    )
+
+    try:
+        await user.send(
+            f"🎫 Your ticket has been created in *{guild.name}*.\n"
+            f"Ticket: {channel.mention}"
+        )
+    except Exception:
+        pass
+
+    await interaction.response.send_message(f"✅ Created {channel.mention}", ephemeral=True)
 
 
 # ---------------- WARNING HELPERS ----------------
@@ -482,120 +614,37 @@ class CloseButton(discord.ui.View):
             pass
 
 
-class TicketButton(discord.ui.View):
+class TicketsButton(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(
         label="🎟️ Open Ticket",
         style=discord.ButtonStyle.green,
-        custom_id="merged_create_ticket"
+        custom_id="tickets_system_create_ticket"
     )
     async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild = interaction.guild
-        user = interaction.user
+        await create_ticket_channel(interaction, auto_messages=True)
 
-        if guild is None:
-            await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
-            return
 
-        category = get_ticket_category(guild)
+class Tickets2Button(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
 
-        if category is None:
-            await interaction.response.send_message(
-                "❌ Ticket category not found. Admin can use !setcategory CATEGORY_ID.",
-                ephemeral=True
-            )
-            return
-
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            user: discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True,
-                attach_files=True
-            ),
-            guild.me: discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True,
-                manage_channels=True,
-                manage_messages=True
-            )
-        }
-
-        for role_id in STAFF_ROLE_IDS:
-            role = guild.get_role(role_id)
-
-            if role is not None:
-                overwrites[role] = discord.PermissionOverwrite(
-                    view_channel=True,
-                    send_messages=True,
-                    read_message_history=True,
-                    attach_files=True
-                )
-
-        channel_name = f"ticket-{clean_channel_name(user.name)}"
-        existing = discord.utils.get(category.text_channels, name=channel_name)
-
-        if existing:
-            await interaction.response.send_message(
-                f"❌ You already have a ticket: {existing.mention}",
-                ephemeral=True
-            )
-            return
-
-        try:
-            channel = await guild.create_text_channel(
-                name=channel_name,
-                category=category,
-                overwrites=overwrites
-            )
-        except discord.Forbidden:
-            await interaction.response.send_message(
-                "❌ I do not have permission to create ticket channels.",
-                ephemeral=True
-            )
-            return
-
-        ticket_owners[str(channel.id)] = {
-            "owner_id": user.id,
-            "last_dm_time": 0,
-            "last_away_reply_time": 0
-        }
-        save_ticket_owners()
-
-        ticket_embed = discord.Embed(
-            title="🎟️ Ticket Opened",
-            description=(
-                "Please explain what you need help with.\n\n"
-                "*Availability Times:* 9am to 10pm UK"
-            ),
-            color=discord.Color.green()
-        )
-
-        await channel.send(
-            content=f"{user.mention}",
-            embed=ticket_embed,
-            view=CloseButton()
-        )
-
-        try:
-            await user.send(
-                f"🎫 Your ticket has been created in *{guild.name}*.\n"
-                f"Ticket: {channel.mention}"
-            )
-        except Exception:
-            pass
-
-        await interaction.response.send_message(f"✅ Created {channel.mention}", ephemeral=True)
+    @discord.ui.button(
+        label="🎫 Create Ticket",
+        style=discord.ButtonStyle.green,
+        custom_id="tickets2_normal_create_ticket"
+    )
+    async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await create_ticket_channel(interaction, auto_messages=False)
 
 
 # ---------------- READY ----------------
 @bot.event
 async def on_ready():
-    bot.add_view(TicketButton())
+    bot.add_view(TicketsButton())
+    bot.add_view(Tickets2Button())
     bot.add_view(CloseButton())
 
     print("----------------------------")
@@ -656,6 +705,9 @@ async def maybe_dm_ticket_owner(message):
     if channel_id not in ticket_owners:
         return
 
+    if not ticket_auto_messages_enabled(message.channel):
+        return
+
     data = ticket_owners[channel_id]
     owner_id = int(data.get("owner_id", 0))
 
@@ -702,6 +754,9 @@ async def maybe_send_away_auto_reply(message):
     channel_id = str(message.channel.id)
 
     if channel_id not in ticket_owners:
+        return
+
+    if not ticket_auto_messages_enabled(message.channel):
         return
 
     data = ticket_owners[channel_id]
@@ -814,9 +869,9 @@ async def on_message(message):
 
 
 # ---------------- YAPPER COMMANDS ----------------
-@bot.command()
+@bot.command(name="tickets", aliases=["ticket"])
 @commands.has_permissions(administrator=True)
-async def ticket(ctx):
+async def tickets(ctx):
     embed = discord.Embed(
         title="🎟️ Open a Ticket to Trade",
         description=(
@@ -826,7 +881,19 @@ async def ticket(ctx):
         color=discord.Color.green()
     )
 
-    await ctx.send(embed=embed, view=TicketButton())
+    await ctx.send(embed=embed, view=TicketsButton())
+
+
+@bot.command(name="tickets2")
+@commands.has_permissions(administrator=True)
+async def tickets2(ctx):
+    embed = discord.Embed(
+        title="🎫 Open a Ticket",
+        description="Click the button below to create a ticket.",
+        color=discord.Color.green()
+    )
+
+    await ctx.send(embed=embed, view=Tickets2Button())
 
 
 @bot.command()
@@ -1214,7 +1281,8 @@ async def on_command_error(ctx, error):
     if isinstance(error, commands.MissingRequiredArgument):
         await ctx.send(
             "❌ Missing info. Examples:\n"
-            "!ticket\n"
+            "!tickets\n"
+            "!tickets2\n"
             "!giveaway 4 Normal\n"
             "!sallyspeak message\n"
             "!warn @user reason\n"
