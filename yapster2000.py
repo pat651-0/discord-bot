@@ -481,6 +481,55 @@ def mention_category(guild: discord.Guild, category_id: int | None) -> str:
     return f"Not found: `{category_id}`"
 
 
+# ---------------- PERMISSION CHECK HELPERS ----------------
+REQUIRED_PERMISSION_ITEMS: list[tuple[str, str, str]] = [
+    ("view_channel", "View Channels", "see setup/ticket/log channels"),
+    ("send_messages", "Send Messages", "send replies, welcome messages, panels, and logs"),
+    ("read_message_history", "Read Message History", "read ticket/giveaway messages"),
+    ("manage_channels", "Manage Channels", "create setup categories and ticket channels"),
+    ("manage_messages", "Manage Messages", "delete banned messages and clean commands"),
+    ("embed_links", "Embed Links", "send ticket, setup, warning, and log embeds"),
+    ("add_reactions", "Add Reactions", "add the giveaway reaction"),
+    ("kick_members", "Kick Members", "kick users after max warnings"),
+    ("ban_members", "Ban Members", "only needed if punishment mode is ban"),
+]
+
+OPTIONAL_PERMISSION_ITEMS: list[tuple[str, str, str]] = [
+    ("manage_roles", "Manage Roles", "only needed later for auto-role/rules-button features"),
+]
+
+
+def build_recommended_permissions() -> discord.Permissions:
+    permissions = discord.Permissions.none()
+
+    for permission_name, _label, _reason in REQUIRED_PERMISSION_ITEMS:
+        if hasattr(permissions, permission_name):
+            setattr(permissions, permission_name, True)
+
+    return permissions
+
+
+def permission_lines(permissions: discord.Permissions, items: list[tuple[str, str, str]]) -> list[str]:
+    lines: list[str] = []
+
+    for permission_name, label, reason in items:
+        has_permission = bool(getattr(permissions, permission_name, False))
+        icon = "✅" if has_permission else "❌"
+        lines.append(f"{icon} **{label}** — {reason}")
+
+    return lines
+
+
+def missing_permission_names(permissions: discord.Permissions) -> list[str]:
+    missing: list[str] = []
+
+    for permission_name, label, _reason in REQUIRED_PERMISSION_ITEMS:
+        if not bool(getattr(permissions, permission_name, False)):
+            missing.append(label)
+
+    return missing
+
+
 SETUP_COMPONENT_ALIASES: dict[str, str] = {
     "ticket": "tickets",
     "tickets": "tickets",
@@ -1948,6 +1997,94 @@ async def setticketownername(ctx: commands.Context, *, name: str) -> None:
     save_server_settings()
 
     await ctx.send(f"✅ Ticket owner display name set to **{discord.utils.escape_markdown(clean_name)}**.")
+
+
+@bot.hybrid_command(name="requiredpermissions", aliases=["permissions", "perms"], description="Show the permissions XSI needs")
+@commands.has_permissions(administrator=True)
+async def requiredpermissions(ctx: commands.Context) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+
+    bot_member = ctx.guild.me or (ctx.guild.get_member(bot.user.id) if bot.user is not None else None)
+
+    if bot_member is None:
+        await ctx.send("❌ I could not check my permissions in this server.")
+        return
+
+    permissions = bot_member.guild_permissions
+    missing = missing_permission_names(permissions)
+
+    embed = discord.Embed(
+        title="🔐 XSI Required Permissions",
+        description=(
+            "Use this to check whether XSI can run setup, tickets, welcomes, logs, giveaways, "
+            "and moderation correctly."
+        ),
+        color=discord.Color.green() if not missing else discord.Color.orange(),
+    )
+
+    required_lines = permission_lines(permissions, REQUIRED_PERMISSION_ITEMS)
+    optional_lines = permission_lines(permissions, OPTIONAL_PERMISSION_ITEMS)
+
+    embed.add_field(
+        name="Required Bot Permissions",
+        value="\n".join(required_lines),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Optional / Future Permissions",
+        value="\n".join(optional_lines),
+        inline=False,
+    )
+
+    role_note = (
+        f"My top role: {bot_member.top_role.mention}\n"
+        "Move XSI's role above members it needs to kick/ban. "
+        "Discord will block moderation if my role is lower than the target member's role."
+    )
+    embed.add_field(name="Role Position", value=role_note, inline=False)
+
+    intent_note = (
+        "Also enable these in the Discord Developer Portal:\n"
+        "✅ Message Content Intent — for `!` commands and automod scanning\n"
+        "✅ Server Members Intent — for welcome/leave messages"
+    )
+    embed.add_field(name="Developer Portal Intents", value=intent_note, inline=False)
+
+    app_command_note = (
+        "The invite link must include both scopes: `bot` and `applications.commands`.\n"
+        "Server/channel permissions should allow staff to use application commands."
+    )
+    embed.add_field(name="Slash Commands", value=app_command_note, inline=False)
+
+    if missing:
+        embed.add_field(
+            name="Missing Right Now",
+            value="❌ " + "\n❌ ".join(missing),
+            inline=False,
+        )
+    else:
+        embed.add_field(
+            name="Status",
+            value="✅ XSI has the main permissions it needs.",
+            inline=False,
+        )
+
+    if bot.user is not None:
+        invite_url = discord.utils.oauth_url(
+            bot.user.id,
+            permissions=build_recommended_permissions(),
+            scopes=("bot", "applications.commands"),
+        )
+        embed.add_field(
+            name="Recommended Invite Link",
+            value=f"[Re-invite XSI with recommended permissions]({invite_url})",
+            inline=False,
+        )
+
+    await ctx.send(embed=embed)
 
 
 @bot.hybrid_command(name="checksetup", description="Show this server's bot setup")
