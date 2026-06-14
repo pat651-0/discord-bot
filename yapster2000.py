@@ -1567,9 +1567,11 @@ async def setup(ctx: commands.Context, *, exclude: Optional[str] = None) -> None
         logs_category: discord.CategoryChannel | None = None
         info_category: discord.CategoryChannel | None = None
 
-        needs_tickets_category = "tickets" not in exclusions
+        # Ticket panel belongs under XSI Tickets, not XSI Info.
+        # Private ticket channels also open under this same category.
+        needs_tickets_category = any(part not in exclusions for part in ["tickets", "ticketpanel"])
         needs_logs_category = any(part not in exclusions for part in ["wall", "leaves", "transcripts", "stafflogs"])
-        needs_info_category = any(part not in exclusions for part in ["welcome", "rules", "giveaways", "ticketpanel"])
+        needs_info_category = any(part not in exclusions for part in ["welcome", "rules", "giveaways"])
 
         if needs_tickets_category:
             before = len(ctx.guild.categories)
@@ -1589,12 +1591,12 @@ async def setup(ctx: commands.Context, *, exclude: Optional[str] = None) -> None
             info_category = await get_or_create_category(ctx.guild, "XSI Info")
             (created if len(ctx.guild.categories) > before else used_existing).append(f"Info Category: **{info_category.name}**")
 
-        if "ticketpanel" not in exclusions and tickets_category is not None and info_category is not None:
+        if "ticketpanel" not in exclusions and tickets_category is not None:
             before = len(ctx.guild.text_channels)
             ticket_panel = await get_or_create_text_channel(
                 ctx.guild,
                 "open-a-ticket",
-                category=info_category,
+                category=tickets_category,
                 topic="Open a ticket here.",
             )
             settings["ticket_panel_channel_id"] = ticket_panel.id
