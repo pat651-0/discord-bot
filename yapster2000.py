@@ -8,7 +8,7 @@ import random
 import re
 import time
 from collections import defaultdict, deque
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -90,11 +90,6 @@ DEFAULT_WELCOME_MESSAGE = "Hey {user} Please Read The Rules"
 
 # Smart auto-replies. Per trigger/user/channel cooldown so XSI does not spam.
 SMART_MESSAGE_COOLDOWN = 30
-
-# Availability panel / ticket smart-away settings.
-DEFAULT_AVAILABLE_START = "09:00"
-DEFAULT_AVAILABLE_END = "22:00"
-AVAILABILITY_PANEL_REFRESH_SECONDS = 60
 
 
 # ---------------- MODERATION SETTINGS ----------------
@@ -227,7 +222,6 @@ intents.reactions = True
 bot = commands.Bot(command_prefix=["!", "?"], intents=intents)
 bot.synced = False
 bot.views_added = False
-bot.availability_loop_started = False
 
 # Spam cache: guild:channel:user -> deque[(timestamp, normalized_content)]
 recent_messages: defaultdict[str, deque[tuple[float, str]]] = defaultdict(deque)
@@ -434,334 +428,6 @@ def format_welcome_message(template: str, member: discord.Member) -> str:
         .replace("{username}", member.name)
         .replace("{display_name}", member.display_name)
     )
-
-
-# ---------------- AVAILABILITY HELPERS ----------------
-def parse_clock_text(value: str) -> tuple[int, int] | None:
-    """Parse times like 9am, 9:30am, 15:00, 3pm, or 330pm."""
-    raw = value.strip().lower().replace(".", "").replace(" ", "")
-    match = re.fullmatch(r"(\d{1,2})(?::?(\d{2}))?(am|pm)?", raw)
-    if match is None:
-        return None
-
-    hour = int(match.group(1))
-    minute = int(match.group(2) or 0)
-    suffix = match.group(3)
-
-    if minute < 0 or minute > 59:
-        return None
-
-    if suffix is not None:
-        if hour < 1 or hour > 12:
-            return None
-
-        if suffix == "am":
-            hour = 0 if hour == 12 else hour
-        else:
-            hour = 12 if hour == 12 else hour + 12
-    else:
-        if hour < 0 or hour > 23:
-            return None
-
-    return hour, minute
-
-
-def minutes_from_clock(clock: tuple[int, int]) -> int:
-    return clock[0] * 60 + clock[1]
-
-
-def clock_to_storage(clock: tuple[int, int]) -> str:
-    return f"{clock[0]:02d}:{clock[1]:02d}"
-
-
-def storage_to_clock(value: Any, fallback: str) -> tuple[int, int]:
-    if isinstance(value, str):
-        parsed = parse_clock_text(value)
-        if parsed is not None:
-            return parsed
-
-    parsed_fallback = parse_clock_text(fallback)
-    return parsed_fallback if parsed_fallback is not None else (9, 0)
-
-
-def format_clock(clock: tuple[int, int]) -> str:
-    hour, minute = clock
-    suffix = "am" if hour < 12 else "pm"
-    hour_12 = hour % 12 or 12
-
-    if minute == 0:
-        return f"{hour_12}{suffix}"
-
-    return f"{hour_12}:{minute:02d}{suffix}"
-
-
-def format_datetime_uk(timestamp: float) -> str:
-    dt = datetime.fromtimestamp(timestamp, UK_TIMEZONE)
-    today = datetime.now(UK_TIMEZONE).date()
-    tomorrow = today + timedelta(days=1)
-    clock = format_clock((dt.hour, dt.minute))
-
-    if dt.date() == today:
-        return f"today at {clock} UK"
-
-    if dt.date() == tomorrow:
-        return f"tomorrow at {clock} UK"
-
-    return f"{dt.strftime('%d %b')} at {clock} UK"
-
-
-def get_availability_start_end(guild_id: int) -> tuple[tuple[int, int], tuple[int, int]]:
-    settings = get_guild_settings(guild_id)
-    start = storage_to_clock(settings.get("availability_start"), DEFAULT_AVAILABLE_START)
-    end = storage_to_clock(settings.get("availability_end"), DEFAULT_AVAILABLE_END)
-    return start, end
-
-
-def get_availability_text(guild_id: int) -> str:
-    start, end = get_availability_start_end(guild_id)
-    return f"Availability Times: {format_clock(start)} to {format_clock(end)} UK"
-
-
-def is_inside_clock_range(now_clock: tuple[int, int], start: tuple[int, int], end: tuple[int, int]) -> bool:
-    now_minutes = minutes_from_clock(now_clock)
-    start_minutes = minutes_from_clock(start)
-    end_minutes = minutes_from_clock(end)
-
-    if start_minutes == end_minutes:
-        # Same start/end means always available.
-        return True
-
-    if start_minutes < end_minutes:
-        return start_minutes <= now_minutes < end_minutes
-
-    # Overnight window, for example 9pm to 2am.
-    return now_minutes >= start_minutes or now_minutes < end_minutes
-
-
-def get_next_start_datetime(now: datetime, start: tuple[int, int], end: tuple[int, int]) -> datetime:
-    start_dt = now.replace(hour=start[0], minute=start[1], second=0, microsecond=0)
-    end_dt = now.replace(hour=end[0], minute=end[1], second=0, microsecond=0)
-
-    if minutes_from_clock(end) <= minutes_from_clock(start):
-        end_dt += timedelta(days=1)
-
-    if now >= end_dt:
-        start_dt += timedelta(days=1)
-
-    if now < start_dt:
-        return start_dt
-
-    # Already inside availability; next start is tomorrow.
-    return start_dt + timedelta(days=1)
-
-
-def build_unavailable_window(start: tuple[int, int], end: tuple[int, int]) -> tuple[datetime, datetime]:
-    now = datetime.now(UK_TIMEZONE)
-    start_dt = now.replace(hour=start[0], minute=start[1], second=0, microsecond=0)
-    end_dt = now.replace(hour=end[0], minute=end[1], second=0, microsecond=0)
-
-    if minutes_from_clock(end) <= minutes_from_clock(start):
-        end_dt += timedelta(days=1)
-
-    if now >= end_dt:
-        start_dt += timedelta(days=1)
-        end_dt += timedelta(days=1)
-
-    return start_dt, end_dt
-
-
-def get_temp_unavailable_data(guild_id: int) -> dict[str, Any] | None:
-    settings = get_guild_settings(guild_id)
-    data = settings.get("temporary_unavailable")
-
-    if not isinstance(data, dict):
-        return None
-
-    start_ts = parse_int(data.get("start_ts"))
-    end_ts = parse_int(data.get("end_ts"))
-
-    if start_ts is None or end_ts is None:
-        settings.pop("temporary_unavailable", None)
-        save_server_settings()
-        return None
-
-    now_ts = int(datetime.now(UK_TIMEZONE).timestamp())
-
-    if now_ts >= end_ts:
-        settings.pop("temporary_unavailable", None)
-        save_server_settings()
-        return None
-
-    data["start_ts"] = start_ts
-    data["end_ts"] = end_ts
-    return data
-
-
-def get_availability_state(guild: discord.Guild) -> dict[str, Any]:
-    now = datetime.now(UK_TIMEZONE)
-    start, end = get_availability_start_end(guild.id)
-    temp = get_temp_unavailable_data(guild.id)
-
-    if temp is not None:
-        start_ts = int(temp["start_ts"])
-        end_ts = int(temp["end_ts"])
-        reason = str(temp.get("message") or "I am currently unavailable and will reply when I’m back.").strip()
-        active = start_ts <= int(now.timestamp()) < end_ts
-
-        return {
-            "regular_text": get_availability_text(guild.id),
-            "is_unavailable": active,
-            "has_scheduled_unavailable": True,
-            "scheduled_active": active,
-            "scheduled_start_text": format_datetime_uk(start_ts),
-            "scheduled_end_text": format_datetime_uk(end_ts),
-            "unavailable_until_text": format_datetime_uk(end_ts),
-            "reason": reason,
-        }
-
-    now_clock = (now.hour, now.minute)
-    available_now = is_inside_clock_range(now_clock, start, end)
-    next_start = get_next_start_datetime(now, start, end)
-
-    return {
-        "regular_text": get_availability_text(guild.id),
-        "is_unavailable": not available_now,
-        "has_scheduled_unavailable": False,
-        "scheduled_active": False,
-        "scheduled_start_text": None,
-        "scheduled_end_text": None,
-        "unavailable_until_text": format_datetime_uk(next_start.timestamp()),
-        "reason": "I am currently offline and will reply when I’m back online.",
-    }
-
-
-def build_ticket_panel_embed(guild: discord.Guild) -> discord.Embed:
-    state = get_availability_state(guild)
-    lines = [
-        "Click the button below to open a ticket.",
-        "",
-        state["regular_text"],
-    ]
-
-    if state["has_scheduled_unavailable"]:
-        if state["scheduled_active"]:
-            lines.extend([
-                "",
-                f"⏰ Currently unavailable until {state['scheduled_end_text']}.",
-            ])
-        else:
-            lines.extend([
-                "",
-                f"⏰ Scheduled unavailable: {state['scheduled_start_text']} to {state['scheduled_end_text']}.",
-            ])
-
-    embed_color = discord.Color.orange() if state["is_unavailable"] else discord.Color.green()
-    return discord.Embed(
-        title="🎟️ Open a Ticket",
-        description="\n".join(lines),
-        color=embed_color,
-    )
-
-
-def build_ticket_open_embed(guild: discord.Guild, auto_messages: bool) -> discord.Embed:
-    if not auto_messages:
-        return discord.Embed(
-            title="🎫 Ticket Opened",
-            description="Please explain what you need help with.",
-            color=discord.Color.green(),
-        )
-
-    state = get_availability_state(guild)
-    lines = [
-        "Please explain what you need help with.",
-        "",
-        state["regular_text"],
-    ]
-
-    if state["is_unavailable"]:
-        lines.extend([
-            "",
-            f"⏰ Currently unavailable until {state['unavailable_until_text']}.",
-        ])
-
-    return discord.Embed(
-        title="🎟️ Ticket Opened",
-        description="\n".join(lines),
-        color=discord.Color.green(),
-    )
-
-
-async def upsert_ticket_panel_message(
-    guild: discord.Guild,
-    channel: discord.TextChannel | None = None,
-    *,
-    create_if_missing: bool = True,
-) -> discord.Message | None:
-    settings = get_guild_settings(guild.id)
-
-    if channel is None:
-        channel_id = get_ticket_panel_channel_id(guild)
-        if channel_id is None:
-            return None
-        channel = await get_guild_sendable_channel(guild, channel_id)
-
-    if channel is None:
-        return None
-
-    settings["ticket_panel_channel_id"] = channel.id
-    embed = build_ticket_panel_embed(guild)
-    message_id = parse_int(settings.get("ticket_panel_message_id"))
-
-    if message_id is not None:
-        try:
-            message = await channel.fetch_message(message_id)
-            await message.edit(embed=embed, view=TicketsButton())
-            save_server_settings()
-            return message
-        except discord.NotFound:
-            settings.pop("ticket_panel_message_id", None)
-        except discord.HTTPException as exc:
-            log.warning("Could not edit ticket panel message %s in %s: %s", message_id, guild.id, exc)
-
-    if not create_if_missing:
-        save_server_settings()
-        return None
-
-    try:
-        message = await channel.send(embed=embed, view=TicketsButton())
-    except discord.HTTPException as exc:
-        log.warning("Could not send ticket panel in %s: %s", guild.id, exc)
-        return None
-
-    settings["ticket_panel_message_id"] = message.id
-    save_server_settings()
-    return message
-
-
-async def refresh_ticket_panel_for_guild(guild: discord.Guild) -> bool:
-    message = await upsert_ticket_panel_message(guild, create_if_missing=False)
-    return message is not None
-
-
-async def availability_panel_refresh_loop() -> None:
-    await bot.wait_until_ready()
-
-    while not bot.is_closed():
-        try:
-            for guild in bot.guilds:
-                settings = get_guild_settings(guild.id)
-                temp_before = settings.get("temporary_unavailable")
-                get_temp_unavailable_data(guild.id)
-                temp_after = settings.get("temporary_unavailable")
-
-                # Refresh panels while a temporary unavailable period is scheduled/active,
-                # and once more when it expires so the panel goes back to normal.
-                if temp_before is not None or temp_after is not None:
-                    await refresh_ticket_panel_for_guild(guild)
-        except Exception as exc:
-            log.exception("Availability panel refresh loop failed: %s", exc)
-
-        await asyncio.sleep(AVAILABILITY_PANEL_REFRESH_SECONDS)
 
 
 # ---------------- GENERAL HELPERS ----------------
@@ -1089,11 +755,7 @@ def clean_channel_name(name: str) -> str:
     return name.strip("-")[:40] or "user"
 
 
-def is_fily_offline_hours(guild: discord.Guild | None = None) -> bool:
-    if guild is not None:
-        return bool(get_availability_state(guild)["is_unavailable"])
-
-    # Fallback for old calls without a guild.
+def is_fily_offline_hours() -> bool:
     now_uk = datetime.now(UK_TIMEZONE)
     return now_uk.hour < AVAILABLE_START_HOUR or now_uk.hour >= AVAILABLE_END_HOUR
 
@@ -1121,28 +783,6 @@ def ticket_auto_messages_enabled(channel: discord.abc.GuildChannel) -> bool:
     if not isinstance(data, dict):
         return False
     return bool(data.get("auto_messages", False))
-
-
-def reset_away_cooldowns_for_guild(guild_id: int) -> int:
-    """Let the next ticket-owner message trigger the current smart-away reply immediately."""
-    changed = 0
-
-    for data in ticket_owners.values():
-        if not isinstance(data, dict):
-            continue
-
-        saved_guild_id = parse_int(data.get("guild_id"))
-        if saved_guild_id != guild_id:
-            continue
-
-        if data.get("last_away_reply_time", 0) != 0:
-            data["last_away_reply_time"] = 0
-            changed += 1
-
-    if changed:
-        save_ticket_owners()
-
-    return changed
 
 
 def find_existing_ticket(guild: discord.Guild, user_id: int) -> discord.TextChannel | None:
@@ -1261,7 +901,21 @@ async def create_ticket_channel(interaction: discord.Interaction, auto_messages:
     }
     save_ticket_owners()
 
-    ticket_embed = build_ticket_open_embed(guild, auto_messages)
+    if auto_messages:
+        ticket_embed = discord.Embed(
+            title="🎟️ Ticket Opened",
+            description=(
+                "Please explain what you need help with.\n\n"
+                "Availability Times: 9am to 10pm UK"
+            ),
+            color=discord.Color.green(),
+        )
+    else:
+        ticket_embed = discord.Embed(
+            title="🎫 Ticket Opened",
+            description="Please explain what you need help with.",
+            color=discord.Color.green(),
+        )
 
     await channel.send(content=user.mention, embed=ticket_embed, view=CloseButton())
 
@@ -1601,10 +1255,6 @@ async def on_ready() -> None:
         bot.add_view(CloseButton())
         bot.views_added = True
 
-    if not bot.availability_loop_started:
-        asyncio.create_task(availability_panel_refresh_loop())
-        bot.availability_loop_started = True
-
     log.info("----------------------------")
     log.info("✅ Merged Bot logged in as %s", bot.user)
     log.info("----------------------------")
@@ -1770,10 +1420,8 @@ async def maybe_send_away_auto_reply(message: discord.Message) -> None:
     if message.author.id != owner_id:
         return
 
-    state = get_availability_state(message.guild)
-
-    # Only send the ticket smart-away reply while unavailable.
-    if not state["is_unavailable"]:
+    # Only outside 9am to 10pm UK.
+    if not is_fily_offline_hours():
         return
 
     now = time.time()
@@ -1784,13 +1432,12 @@ async def maybe_send_away_auto_reply(message: discord.Message) -> None:
         return
 
     owner_display_name = get_ticket_owner_display_name(message.channel)
-    reason = str(state.get("reason") or "I am currently unavailable and will reply when I’m back.")
 
     away_msg = await message.channel.send(
         f"{message.author.mention}\n"
-        f"⏰ {owner_display_name} is currently unavailable.\n\n"
-        f"{reason}\n"
-        f"Back: {state['unavailable_until_text']}",
+        f"⏰ {owner_display_name} is currently offline.\n\n"
+        "Available hours are 9:00 AM - 10:00 PM UK time.\n"
+        f"{owner_display_name} will reply when they’re back online.",
         allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
     )
 
@@ -1896,92 +1543,6 @@ async def set_guilt_channel_from_command(ctx: commands.Context, channel: Optiona
     await ctx.send(f"✅ Leaves / Board of Guilt channel set to {target.mention}.")
 
 
-# ---------------- CLEAR SETUP HELPERS ----------------
-SETUP_CHANNEL_KEYS = [
-    "ticket_panel_channel_id",
-    "welcome_channel_id",
-    "rules_channel_id",
-    "giveaways_channel_id",
-    "wall_channel_id",
-    "leaves_channel_id",
-    "guilt_channel_id",
-    "transcript_channel_id",
-    "staff_logs_channel_id",
-]
-
-SETUP_CATEGORY_KEYS = [
-    "ticket_category_id",
-    "logs_category_id",
-    "info_category_id",
-]
-
-XSI_CATEGORY_NAMES = {"xsi tickets", "xsi logs", "xsi info"}
-
-
-def is_xsi_setup_channel(channel: discord.TextChannel) -> bool:
-    return channel.category is not None and channel.category.name.lower() in XSI_CATEGORY_NAMES
-
-
-async def clear_setup_channels_and_categories(guild: discord.Guild, settings_snapshot: dict[str, Any]) -> tuple[list[str], list[str]]:
-    deleted: list[str] = []
-    skipped: list[str] = []
-    channel_ids: set[int] = set()
-
-    for key in SETUP_CHANNEL_KEYS:
-        channel_id = parse_int(settings_snapshot.get(key))
-        if channel_id is not None:
-            channel_ids.add(channel_id)
-
-    for channel_id in channel_ids:
-        channel = guild.get_channel(channel_id)
-        if not isinstance(channel, discord.TextChannel):
-            continue
-
-        if not is_xsi_setup_channel(channel):
-            skipped.append(f"Skipped {channel.mention} because it is not inside an XSI setup category")
-            continue
-
-        channel_name = channel.name
-        try:
-            await channel.delete(reason="XSI setup cleared by administrator")
-            deleted.append(f"#{channel_name}")
-        except discord.HTTPException:
-            skipped.append(f"Could not delete #{channel_name}")
-
-    category_ids: set[int] = set()
-
-    for key in SETUP_CATEGORY_KEYS:
-        category_id = parse_int(settings_snapshot.get(key))
-        if category_id is not None:
-            category_ids.add(category_id)
-
-    for category in guild.categories:
-        if category.name.lower() in XSI_CATEGORY_NAMES:
-            category_ids.add(category.id)
-
-    for category_id in category_ids:
-        category = guild.get_channel(category_id)
-        if not isinstance(category, discord.CategoryChannel):
-            continue
-
-        if category.name.lower() not in XSI_CATEGORY_NAMES:
-            skipped.append(f"Skipped category {category.name} because it is not an XSI setup category")
-            continue
-
-        if category.channels:
-            skipped.append(f"Skipped category {category.name} because it still has channels in it")
-            continue
-
-        category_name = category.name
-        try:
-            await category.delete(reason="XSI setup cleared by administrator")
-            deleted.append(f"Category: {category_name}")
-        except discord.HTTPException:
-            skipped.append(f"Could not delete category {category_name}")
-
-    return deleted, skipped
-
-
 # ---------------- AUTO SETUP COMMAND ----------------
 @bot.hybrid_command(name="setup", description="Automatically create XSI categories/channels. Use 'no giveaways' etc. to skip parts.")
 @commands.has_permissions(administrator=True)
@@ -2006,11 +1567,9 @@ async def setup(ctx: commands.Context, *, exclude: Optional[str] = None) -> None
         logs_category: discord.CategoryChannel | None = None
         info_category: discord.CategoryChannel | None = None
 
-        # Ticket panel belongs under XSI Tickets, not XSI Info.
-        # Private ticket channels also open under this same category.
-        needs_tickets_category = any(part not in exclusions for part in ["tickets", "ticketpanel"])
+        needs_tickets_category = "tickets" not in exclusions
         needs_logs_category = any(part not in exclusions for part in ["wall", "leaves", "transcripts", "stafflogs"])
-        needs_info_category = any(part not in exclusions for part in ["welcome", "rules", "giveaways"])
+        needs_info_category = any(part not in exclusions for part in ["welcome", "rules", "giveaways", "ticketpanel"])
 
         if needs_tickets_category:
             before = len(ctx.guild.categories)
@@ -2023,27 +1582,30 @@ async def setup(ctx: commands.Context, *, exclude: Optional[str] = None) -> None
         if needs_logs_category:
             before = len(ctx.guild.categories)
             logs_category = await get_or_create_category(ctx.guild, "XSI Logs")
-            settings["logs_category_id"] = logs_category.id
             (created if len(ctx.guild.categories) > before else used_existing).append(f"Logs Category: **{logs_category.name}**")
 
         if needs_info_category:
             before = len(ctx.guild.categories)
             info_category = await get_or_create_category(ctx.guild, "XSI Info")
-            settings["info_category_id"] = info_category.id
             (created if len(ctx.guild.categories) > before else used_existing).append(f"Info Category: **{info_category.name}**")
 
-        if "ticketpanel" not in exclusions and tickets_category is not None:
+        if "ticketpanel" not in exclusions and tickets_category is not None and info_category is not None:
             before = len(ctx.guild.text_channels)
             ticket_panel = await get_or_create_text_channel(
                 ctx.guild,
                 "open-a-ticket",
-                category=tickets_category,
+                category=info_category,
                 topic="Open a ticket here.",
             )
             settings["ticket_panel_channel_id"] = ticket_panel.id
             (created if len(ctx.guild.text_channels) > before else used_existing).append(f"Ticket Panel Channel: {ticket_panel.mention}")
 
-            await upsert_ticket_panel_message(ctx.guild, ticket_panel, create_if_missing=True)
+            ticket_embed = discord.Embed(
+                title="🎟️ Open a Ticket",
+                description="Click the button below to open a ticket.\n\nAvailability Times: 9am to 10pm UK",
+                color=discord.Color.green(),
+            )
+            await ticket_panel.send(embed=ticket_embed, view=TicketsButton())
         elif "ticketpanel" in exclusions:
             skipped.append("Ticket Panel Channel")
 
@@ -2177,64 +1739,6 @@ async def setup(ctx: commands.Context, *, exclude: Optional[str] = None) -> None
             "`!setup no welcome no transcripts` = skip welcome and transcripts\n"
             "Slash: `/setup exclude: giveaways,welcome`"
         ),
-        inline=False,
-    )
-
-    await ctx.send(embed=embed)
-
-
-@bot.hybrid_command(name="clearsetup", description="Clear this server's saved XSI setup. Optional: delete XSI setup channels too.")
-@commands.has_permissions(administrator=True)
-@app_commands.describe(delete_channels="True = also delete XSI setup channels/categories that XSI created")
-async def clearsetup(ctx: commands.Context, delete_channels: bool = False) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
-        return
-
-    if ctx.interaction is not None:
-        await ctx.defer()
-
-    guild_key = str(ctx.guild.id)
-    settings_snapshot = dict(get_guild_settings(ctx.guild.id))
-
-    deleted: list[str] = []
-    skipped: list[str] = []
-
-    if delete_channels:
-        try:
-            deleted, skipped = await clear_setup_channels_and_categories(ctx.guild, settings_snapshot)
-        except discord.Forbidden:
-            await ctx.send("❌ I need **Manage Channels** permission to delete setup channels.")
-            return
-
-    server_settings.pop(guild_key, None)
-
-    removed_ticket_records = 0
-    for channel_id, data in list(ticket_owners.items()):
-        if isinstance(data, dict) and parse_int(data.get("guild_id")) == ctx.guild.id:
-            ticket_owners.pop(channel_id, None)
-            removed_ticket_records += 1
-
-    save_server_settings()
-    save_ticket_owners()
-
-    embed = discord.Embed(
-        title="🧹 XSI Setup Cleared",
-        description="Saved setup for this server has been cleared.",
-        color=discord.Color.orange(),
-    )
-    embed.add_field(name="Deleted channels/categories", value="Yes" if delete_channels else "No — saved settings only", inline=False)
-    embed.add_field(name="Removed ticket records", value=str(removed_ticket_records), inline=True)
-
-    if deleted:
-        embed.add_field(name="Deleted", value="\n".join(deleted)[:1024], inline=False)
-
-    if skipped:
-        embed.add_field(name="Skipped / Not Deleted", value="\n".join(skipped)[:1024], inline=False)
-
-    embed.add_field(
-        name="To set it back up",
-        value="Run `/setup` or `!setup` again.",
         inline=False,
     )
 
@@ -2424,176 +1928,6 @@ async def testwelcome(ctx: commands.Context) -> None:
     )
 
 
-@bot.hybrid_command(name="setavailability", description="Set normal ticket availability hours until changed again")
-@commands.has_permissions(administrator=True)
-@app_commands.describe(
-    start_time="Start time, for example 9am or 09:00",
-    end_time="End time, for example 10pm or 22:00",
-)
-async def setavailability(ctx: commands.Context, start_time: str, end_time: str) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
-        return
-
-    start = parse_clock_text(start_time)
-    end = parse_clock_text(end_time)
-
-    if start is None or end is None:
-        await ctx.send("❌ Bad time format. Use examples like `9am`, `3:30pm`, `15:00`, or `22:00`.")
-        return
-
-    settings = get_guild_settings(ctx.guild.id)
-    settings["availability_start"] = clock_to_storage(start)
-    settings["availability_end"] = clock_to_storage(end)
-    save_server_settings()
-    reset_away_cooldowns_for_guild(ctx.guild.id)
-
-    updated = await refresh_ticket_panel_for_guild(ctx.guild)
-
-    await ctx.send(
-        f"✅ Availability set to **{format_clock(start)} to {format_clock(end)} UK**.\n"
-        f"Ticket panel updated: {'yes' if updated else 'not found yet — run `/tickets` or `/setup`'}"
-    )
-
-
-@bot.hybrid_command(name="clearavailability", description="Reset normal ticket availability back to 9am to 10pm UK")
-@commands.has_permissions(administrator=True)
-async def clearavailability(ctx: commands.Context) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
-        return
-
-    settings = get_guild_settings(ctx.guild.id)
-    settings.pop("availability_start", None)
-    settings.pop("availability_end", None)
-    save_server_settings()
-    reset_away_cooldowns_for_guild(ctx.guild.id)
-
-    updated = await refresh_ticket_panel_for_guild(ctx.guild)
-
-    await ctx.send(
-        "✅ Availability reset to **9am to 10pm UK**.\n"
-        f"Ticket panel updated: {'yes' if updated else 'not found yet — run `/tickets` or `/setup`'}"
-    )
-
-
-@bot.hybrid_command(name="setunavailable", description="Set a temporary unavailable period and update the ticket panel")
-@commands.has_permissions(administrator=True)
-@app_commands.describe(
-    start_time="Unavailable start time, for example 3pm or 15:00",
-    end_time="Unavailable end time, for example 6pm or 18:00",
-    message="Optional ticket auto-reply message while unavailable",
-)
-async def setunavailable(
-    ctx: commands.Context,
-    start_time: str,
-    end_time: str,
-    *,
-    message: Optional[str] = None,
-) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
-        return
-
-    start = parse_clock_text(start_time)
-    end = parse_clock_text(end_time)
-
-    if start is None or end is None:
-        await ctx.send("❌ Bad time format. Use examples like `3pm`, `6pm`, `15:00`, or `18:00`.")
-        return
-
-    start_dt, end_dt = build_unavailable_window(start, end)
-    clean_message = (message or "I am currently unavailable and will reply when I’m back.").strip()
-
-    if len(clean_message) > 600:
-        await ctx.send("❌ Message is too long. Keep it under 600 characters.")
-        return
-
-    settings = get_guild_settings(ctx.guild.id)
-    settings["temporary_unavailable"] = {
-        "start_ts": int(start_dt.timestamp()),
-        "end_ts": int(end_dt.timestamp()),
-        "message": clean_message,
-        "created_by": ctx.author.id,
-        "created_at": int(time.time()),
-    }
-    save_server_settings()
-    reset_away_cooldowns_for_guild(ctx.guild.id)
-
-    updated = await refresh_ticket_panel_for_guild(ctx.guild)
-
-    await ctx.send(
-        "✅ Temporary unavailable period set.\n"
-        f"From: **{format_datetime_uk(start_dt.timestamp())}**\n"
-        f"Until: **{format_datetime_uk(end_dt.timestamp())}**\n"
-        f"Ticket panel updated: {'yes' if updated else 'not found yet — run `/tickets` or `/setup`'}"
-    )
-
-
-@bot.hybrid_command(name="clearunavailable", aliases=["available"], description="Clear the temporary unavailable period now")
-@commands.has_permissions(administrator=True)
-async def clearunavailable(ctx: commands.Context) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
-        return
-
-    settings = get_guild_settings(ctx.guild.id)
-    settings.pop("temporary_unavailable", None)
-    save_server_settings()
-    reset_away_cooldowns_for_guild(ctx.guild.id)
-
-    updated = await refresh_ticket_panel_for_guild(ctx.guild)
-
-    await ctx.send(
-        "✅ Temporary unavailable period cleared.\n"
-        f"Ticket panel updated: {'yes' if updated else 'not found yet — run `/tickets` or `/setup`'}"
-    )
-
-
-@bot.hybrid_command(name="availability", description="Show current ticket availability status")
-@commands.has_permissions(manage_messages=True)
-async def availability(ctx: commands.Context) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
-        return
-
-    state = get_availability_state(ctx.guild)
-
-    embed = discord.Embed(
-        title="⏰ XSI Availability",
-        color=discord.Color.orange() if state["is_unavailable"] else discord.Color.green(),
-    )
-    embed.add_field(name="Normal Hours", value=state["regular_text"], inline=False)
-    embed.add_field(name="Status", value="Unavailable" if state["is_unavailable"] else "Available", inline=True)
-
-    if state["has_scheduled_unavailable"]:
-        embed.add_field(
-            name="Temporary Unavailable",
-            value=f"{state['scheduled_start_text']} to {state['scheduled_end_text']}",
-            inline=False,
-        )
-
-    if state["is_unavailable"]:
-        embed.add_field(name="Back", value=state["unavailable_until_text"], inline=False)
-
-    await ctx.send(embed=embed)
-
-
-@bot.hybrid_command(name="refreshticketpanel", description="Force-refresh the saved ticket panel message")
-@commands.has_permissions(administrator=True)
-async def refreshticketpanel(ctx: commands.Context) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
-        return
-
-    updated = await refresh_ticket_panel_for_guild(ctx.guild)
-
-    if updated:
-        await ctx.send("✅ Ticket panel refreshed.")
-    else:
-        await ctx.send("❌ No saved ticket panel found. Run `/tickets` or `/setup` first.")
-
-
 @bot.hybrid_command(name="setstaffrole", description="Set the staff role that can see and close tickets")
 @commands.has_permissions(administrator=True)
 @app_commands.describe(role="Staff role")
@@ -2778,17 +2112,9 @@ async def checksetup(ctx: commands.Context) -> None:
         color=discord.Color.blue(),
     )
     smart_count = len(get_smart_messages(ctx.guild.id))
-    availability_state = get_availability_state(ctx.guild)
 
     embed.add_field(name="Ticket Category", value=category_text, inline=False)
     embed.add_field(name="Ticket Panel Channel", value=mention_channel(ctx.guild, get_ticket_panel_channel_id(ctx.guild)), inline=False)
-    embed.add_field(name="Availability", value=availability_state["regular_text"], inline=False)
-    if availability_state["has_scheduled_unavailable"]:
-        embed.add_field(
-            name="Temporary Unavailable",
-            value=f"{availability_state['scheduled_start_text']} to {availability_state['scheduled_end_text']}",
-            inline=False,
-        )
     embed.add_field(name="Welcome Channel", value=mention_channel(ctx.guild, get_welcome_channel_id(ctx.guild)), inline=False)
     embed.add_field(name="Welcome Message", value=get_welcome_message(ctx.guild), inline=False)
     embed.add_field(name="Rules Channel", value=mention_channel(ctx.guild, get_rules_channel_id(ctx.guild)), inline=False)
@@ -2819,16 +2145,16 @@ async def synccommands(ctx: commands.Context) -> None:
 @bot.hybrid_command(name="tickets", aliases=["ticket"], description="Send the ticket panel with auto messages")
 @commands.has_permissions(administrator=True)
 async def tickets(ctx: commands.Context) -> None:
-    if ctx.guild is None or not isinstance(ctx.channel, discord.TextChannel):
-        await ctx.send("❌ This command only works inside a server text channel.")
-        return
+    embed = discord.Embed(
+        title="🎟️ Open a Ticket to Trade",
+        description=(
+            "Click the button below to open a ticket.\n\n"
+            "Availability Times: 9am to 10pm UK"
+        ),
+        color=discord.Color.green(),
+    )
 
-    message = await ctx.send(embed=build_ticket_panel_embed(ctx.guild), view=TicketsButton())
-
-    settings = get_guild_settings(ctx.guild.id)
-    settings["ticket_panel_channel_id"] = ctx.channel.id
-    settings["ticket_panel_message_id"] = message.id
-    save_server_settings()
+    await ctx.send(embed=embed, view=TicketsButton())
 
 
 @bot.hybrid_command(name="tickets2", description="Send the basic ticket panel")
