@@ -8,102 +8,75 @@ import random
 import re
 import time
 from collections import defaultdict, deque
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
+
+# ============================================================
+# XSI DISCORD BOT - FULL SINGLE FILE
+# Start command stays the same:
+# python xsi_bot_full_setup_requiredpermissions.py
+# ============================================================
+
+VERSION = "XSI full setup build 2026-06-15 / availability-clearsetup-fixed"
+BUILD_TAG = "XSI-FORCE-42-AVAILABILITY-CLEARSETUP"
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
-log = logging.getLogger("merged_discord_bot")
+log = logging.getLogger("xsi_bot")
 
 
 # ---------------- TOKEN ----------------
-# Railway variable name. Do NOT paste the token directly into this file.
 TOKEN_NAME = "TOKEN"
 
 
-# ---------------- DATA FILES ----------------
-# On Railway, add a Volume if you want JSON data to survive redeploys.
-# If Railway provides RAILWAY_VOLUME_MOUNT_PATH, this script will use it automatically.
-DATA_DIR = Path(os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "data"))
+# ---------------- FILES ----------------
+# If Railway Volume is enabled, Railway exposes RAILWAY_VOLUME_MOUNT_PATH.
+# If not, files are stored next to this script.
+DATA_DIR = Path(os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "."))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-SERVER_SETTINGS_FILE = DATA_DIR / "server_settings.json"
-WARNINGS_FILE = DATA_DIR / "knob_warnings.json"
-TICKET_OWNERS_FILE = DATA_DIR / "ticket_owners.json"
+SERVER_SETTINGS_FILE = DATA_DIR / "xsi_server_settings.json"
+WARNINGS_FILE = DATA_DIR / "xsi_warnings.json"
+TICKET_OWNERS_FILE = DATA_DIR / "xsi_ticket_owners.json"
+SMART_MESSAGES_FILE = DATA_DIR / "xsi_smart_messages.json"
+GIVEAWAYS_FILE = DATA_DIR / "xsi_giveaways.json"
 
 
-# ---------------- DEFAULT IDS / FALLBACKS ----------------
-# These keep your current servers working. New servers can be set up with commands.
-DEFAULT_STAFF_ROLE_IDS = [
-    1470379426297548957,
-]
-
-DEFAULT_TICKET_CATEGORY_IDS = [
-    1472860643475329096,  # your server ticket category
-    1507876447467995226,  # friend's server ticket category
-]
-
-DEFAULT_TICKET_OWNER_NAMES_BY_CATEGORY = {
-    1472860643475329096: "Filiy V",  # your server
-    1507876447467995226: "Mruss",    # friend's server
-}
-
-DEFAULT_TICKET_OWNER_NAME = "Filiy V"
-
-DEFAULT_LEAVES_CHANNEL_ID = 1475079442291363901
-DEFAULT_WALL_CHANNEL_ID = 1509103133479932085
-
-# Your Discord ID. Your replies still trigger ticket-owner DMs.
-# Configured staff roles can also trigger ticket-owner DMs.
-OWNER_USER_IDS = [
-    1137385938155221073,
-]
-
-
-# ---------------- GIVEAWAY SETTINGS ----------------
-GIVEAWAY_TIME = 24 * 60 * 60
-TEST_GIVEAWAY_TIME = 30
-
-
-# ---------------- TICKET AUTO MESSAGE SETTINGS ----------------
+# ---------------- DEFAULTS ----------------
 UK_TIMEZONE = ZoneInfo("Europe/London")
-AVAILABLE_START_HOUR = 9
-AVAILABLE_END_HOUR = 22
-
-TICKET_DM_COOLDOWN = 60 * 60
-AWAY_AUTO_REPLY_COOLDOWN = 60 * 60
-AWAY_AUTO_REPLY_DELETE_AFTER = 5 * 60
-
-
-# ---------------- WELCOME SETTINGS ----------------
+DEFAULT_TIMEZONE = "Europe/London"
+DEFAULT_AVAILABLE_START = "9am"
+DEFAULT_AVAILABLE_END = "10pm"
 DEFAULT_WELCOME_MESSAGE = "Hey {user} Please Read The Rules"
+DEFAULT_UNAVAILABLE_MESSAGE = "I am unavailable right now. I will reply when I am back."
 
-# Smart auto-replies. Per trigger/user/channel cooldown so XSI does not spam.
-SMART_MESSAGE_COOLDOWN = 30
-
-
-# ---------------- MODERATION SETTINGS ----------------
 MAX_WARNINGS = 3
 SPAM_LIMIT = 5
 SPAM_SECONDS = 10
+PUNISHMENT_ON_MAX_WARNINGS = "kick"  # "kick" or "ban"
+SMART_MESSAGE_COOLDOWN = 60
+TICKET_DM_COOLDOWN = 60 * 60
+AWAY_AUTO_REPLY_COOLDOWN = 60 * 60
+AWAY_AUTO_REPLY_DELETE_AFTER = 5 * 60
+GIVEAWAY_TIME = 24 * 60 * 60
+TEST_GIVEAWAY_TIME = 30
 
-# Use "kick" or "ban".
-PUNISHMENT_ON_MAX_WARNINGS = "kick"
+# Optional: put your Discord user ID here if you want your ticket replies to DM ticket owners.
+OWNER_USER_IDS = [1137385938155221073]
 
 BANNED_PHRASES = [
     "@everyone",
     "@here",
-
     "modded account",
     "modded accounts",
     "modded acc",
@@ -128,7 +101,6 @@ BANNED_PHRASES = [
     "high level accounts",
     "recovery account",
     "recovery accounts",
-
     "account for sale",
     "accounts for sale",
     "account's for sale",
@@ -159,7 +131,6 @@ BANNED_PHRASES = [
     "cheap accounts",
     "cheap acc",
     "cheap accs",
-
     "money service",
     "money services",
     "money serv",
@@ -181,7 +152,6 @@ BANNED_PHRASES = [
     "gta cash services",
     "bank boost",
     "bank boosts",
-
     "account boost",
     "account boosting",
     "rank boost",
@@ -192,7 +162,6 @@ BANNED_PHRASES = [
     "level boosts",
     "xp boost",
     "xp boosts",
-
     "unlock all",
     "unlock-all",
     "unlock service",
@@ -211,6 +180,41 @@ BANNED_PHRASES = [
     "mod menu services",
 ]
 
+SETUP_COMPONENTS = {
+    "tickets",
+    "ticketpanel",
+    "logs",
+    "wall",
+    "guilt",
+    "leaves",
+    "transcripts",
+    "stafflogs",
+    "info",
+    "welcome",
+    "rules",
+    "giveaways",
+}
+
+SKIP_ALIASES = {
+    "ticket": "tickets",
+    "ticketcategory": "tickets",
+    "panel": "ticketpanel",
+    "ticket-panel": "ticketpanel",
+    "open-a-ticket": "ticketpanel",
+    "log": "logs",
+    "wallofknobs": "wall",
+    "wall-of-knobs": "wall",
+    "boardofguilt": "guilt",
+    "board-of-guilt": "guilt",
+    "leave": "leaves",
+    "left": "leaves",
+    "transcript": "transcripts",
+    "stafflog": "stafflogs",
+    "staff-logs": "stafflogs",
+    "staff_logs": "stafflogs",
+    "giveaway": "giveaways",
+}
+
 
 # ---------------- INTENTS ----------------
 intents = discord.Intents.default()
@@ -219,39 +223,33 @@ intents.guilds = True
 intents.members = True
 intents.reactions = True
 
-bot = commands.Bot(command_prefix=["!", "?"], intents=intents)
-bot.synced = False
-bot.views_added = False
-
-# Spam cache: guild:channel:user -> deque[(timestamp, normalized_content)]
-recent_messages: defaultdict[str, deque[tuple[float, str]]] = defaultdict(deque)
-
-# Smart-message cooldown cache: guild:channel:user:trigger -> last_reply_time
-smart_message_cooldowns: defaultdict[str, float] = defaultdict(float)
-
 
 # ---------------- JSON HELPERS ----------------
+def _copy_default(default: Any) -> Any:
+    if isinstance(default, dict):
+        return default.copy()
+    if isinstance(default, list):
+        return default.copy()
+    return default
+
+
 def load_json(path: Path, default: Any) -> Any:
     if not path.exists():
-        return default.copy() if isinstance(default, dict) else default
+        return _copy_default(default)
 
     try:
         with path.open("r", encoding="utf-8") as file:
-            return json.load(file)
+            data = json.load(file)
     except json.JSONDecodeError:
         log.warning("JSON file is corrupted, using default: %s", path)
-        return default.copy() if isinstance(default, dict) else default
+        return _copy_default(default)
     except OSError as exc:
         log.warning("Could not read %s: %s", path, exc)
-        return default.copy() if isinstance(default, dict) else default
+        return _copy_default(default)
 
-
-def load_json_dict(path: Path) -> dict[str, Any]:
-    data = load_json(path, {})
-
-    if not isinstance(data, dict):
-        log.warning("%s did not contain a JSON object, resetting to empty dict.", path)
-        return {}
+    if isinstance(default, dict) and not isinstance(data, dict):
+        log.warning("%s did not contain a JSON object, resetting to default.", path)
+        return _copy_default(default)
 
     return data
 
@@ -267,727 +265,146 @@ def save_json(path: Path, data: Any) -> None:
         log.exception("Could not save %s: %s", path, exc)
 
 
-server_settings: dict[str, Any] = load_json_dict(SERVER_SETTINGS_FILE)
-warnings_store: dict[str, Any] = load_json_dict(WARNINGS_FILE)
-ticket_owners: dict[str, Any] = load_json_dict(TICKET_OWNERS_FILE)
+server_settings: dict[str, Any] = load_json(SERVER_SETTINGS_FILE, {})
+warnings_store: dict[str, Any] = load_json(WARNINGS_FILE, {})
+ticket_owners: dict[str, Any] = load_json(TICKET_OWNERS_FILE, {})
+smart_messages: dict[str, Any] = load_json(SMART_MESSAGES_FILE, {})
+active_giveaways: dict[str, Any] = load_json(GIVEAWAYS_FILE, {})
+
+settings_lock = asyncio.Lock()
+warnings_lock = asyncio.Lock()
+tickets_lock = asyncio.Lock()
+smart_lock = asyncio.Lock()
+giveaway_lock = asyncio.Lock()
 
 
-def save_server_settings() -> None:
+async def save_server_settings() -> None:
     save_json(SERVER_SETTINGS_FILE, server_settings)
 
 
-def save_warnings() -> None:
+async def save_warnings() -> None:
     save_json(WARNINGS_FILE, warnings_store)
 
 
-def save_ticket_owners() -> None:
+async def save_ticket_owners() -> None:
     save_json(TICKET_OWNERS_FILE, ticket_owners)
 
 
-# ---------------- SERVER SETTINGS HELPERS ----------------
-def get_guild_settings(guild_id: int) -> dict[str, Any]:
-    key = str(guild_id)
-    data = server_settings.get(key)
+async def save_smart_messages() -> None:
+    save_json(SMART_MESSAGES_FILE, smart_messages)
+
+
+async def save_giveaways() -> None:
+    save_json(GIVEAWAYS_FILE, active_giveaways)
+
+
+# ---------------- BOT CLASS ----------------
+class XSIBot(commands.Bot):
+    async def setup_hook(self) -> None:
+        self.add_view(TicketsButton())
+        self.add_view(Tickets2Button())
+        self.add_view(CloseButton())
+        if not availability_refresher.is_running():
+            availability_refresher.start()
+        if not giveaway_checker.is_running():
+            giveaway_checker.start()
+
+
+bot = XSIBot(command_prefix=["!", "?"], intents=intents)
+
+# Spam cache: guild:channel:user -> deque[(timestamp, normalized_content)]
+recent_messages: defaultdict[str, deque[tuple[float, str]]] = defaultdict(deque)
+smart_cooldowns: dict[str, float] = {}
+
+
+# ============================================================
+# CONFIG HELPERS
+# ============================================================
+def default_guild_config() -> dict[str, Any]:
+    return {
+        "staff_role_ids": [],
+        "ticket_category_id": None,
+        "ticket_panel_channel_id": None,
+        "ticket_panel_message_id": None,
+        "welcome_channel_id": None,
+        "welcome_message": DEFAULT_WELCOME_MESSAGE,
+        "wall_channel_id": None,
+        "leaves_channel_id": None,
+        "guilt_channel_id": None,
+        "transcript_channel_id": None,
+        "staff_log_channel_id": None,
+        "rules_channel_id": None,
+        "giveaways_channel_id": None,
+        "availability": {
+            "timezone": DEFAULT_TIMEZONE,
+            "start": DEFAULT_AVAILABLE_START,
+            "end": DEFAULT_AVAILABLE_END,
+            "enabled": True,
+        },
+        "temporary_unavailable": None,
+        "last_availability_status": None,
+        "created_category_ids": [],
+        "created_channel_ids": [],
+    }
+
+
+def ensure_guild_config(guild_id: int) -> dict[str, Any]:
+    gid = str(guild_id)
+    data = server_settings.get(gid)
+    defaults = default_guild_config()
 
     if not isinstance(data, dict):
-        data = {}
-        server_settings[key] = data
+        server_settings[gid] = defaults
+        return defaults
+
+    changed = False
+    for key, value in defaults.items():
+        if key not in data:
+            data[key] = value
+            changed = True
+
+    if not isinstance(data.get("staff_role_ids"), list):
+        data["staff_role_ids"] = []
+        changed = True
+
+    if not isinstance(data.get("created_category_ids"), list):
+        data["created_category_ids"] = []
+        changed = True
+
+    if not isinstance(data.get("created_channel_ids"), list):
+        data["created_channel_ids"] = []
+        changed = True
+
+    if not isinstance(data.get("availability"), dict):
+        data["availability"] = defaults["availability"]
+        changed = True
+
+    if changed:
+        server_settings[gid] = data
 
     return data
 
 
-def parse_int(value: Any) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+def guild_config(guild: discord.Guild | int) -> dict[str, Any]:
+    guild_id = guild.id if isinstance(guild, discord.Guild) else guild
+    return ensure_guild_config(guild_id)
 
 
-def get_staff_role_ids(guild_id: int) -> list[int]:
-    settings = get_guild_settings(guild_id)
-    saved_ids = settings.get("staff_role_ids")
+def add_created_category(config: dict[str, Any], category_id: int) -> None:
+    ids = config.setdefault("created_category_ids", [])
+    if category_id not in ids:
+        ids.append(category_id)
 
-    if isinstance(saved_ids, list):
-        valid_ids = [role_id for role_id in (parse_int(item) for item in saved_ids) if role_id is not None]
-        if valid_ids:
-            return valid_ids
 
-    return DEFAULT_STAFF_ROLE_IDS.copy()
+def add_created_channel(config: dict[str, Any], channel_id: int) -> None:
+    ids = config.setdefault("created_channel_ids", [])
+    if channel_id not in ids:
+        ids.append(channel_id)
 
 
-def get_ticket_owner_name_for_guild(guild: discord.Guild, category: discord.CategoryChannel | None = None) -> str:
-    settings = get_guild_settings(guild.id)
-    saved_name = settings.get("ticket_owner_name")
-
-    if isinstance(saved_name, str) and saved_name.strip():
-        return saved_name.strip()
-
-    if category is not None:
-        return DEFAULT_TICKET_OWNER_NAMES_BY_CATEGORY.get(category.id, DEFAULT_TICKET_OWNER_NAME)
-
-    return DEFAULT_TICKET_OWNER_NAME
-
-
-def get_wall_channel_id(guild: discord.Guild) -> int | None:
-    settings = get_guild_settings(guild.id)
-    saved_id = parse_int(settings.get("wall_channel_id"))
-
-    if saved_id is not None:
-        return saved_id
-
-    if guild.get_channel(DEFAULT_WALL_CHANNEL_ID) is not None:
-        return DEFAULT_WALL_CHANNEL_ID
-
-    return None
-
-
-def get_guilt_channel_id(guild: discord.Guild) -> int | None:
-    settings = get_guild_settings(guild.id)
-
-    # Preferred key for the new setup system.
-    saved_id = parse_int(settings.get("leaves_channel_id"))
-    if saved_id is not None:
-        return saved_id
-
-    # Backwards/alternate naming support.
-    saved_id = parse_int(settings.get("guilt_channel_id"))
-    if saved_id is not None:
-        return saved_id
-
-    if guild.get_channel(DEFAULT_LEAVES_CHANNEL_ID) is not None:
-        return DEFAULT_LEAVES_CHANNEL_ID
-
-    return None
-
-
-def get_welcome_channel_id(guild: discord.Guild) -> int | None:
-    settings = get_guild_settings(guild.id)
-    return parse_int(settings.get("welcome_channel_id"))
-
-
-def get_welcome_message(guild: discord.Guild) -> str:
-    settings = get_guild_settings(guild.id)
-    saved_message = settings.get("welcome_message")
-
-    if isinstance(saved_message, str) and saved_message.strip():
-        return saved_message.strip()
-
-    return DEFAULT_WELCOME_MESSAGE
-
-
-def get_rules_channel_id(guild: discord.Guild) -> int | None:
-    settings = get_guild_settings(guild.id)
-    return parse_int(settings.get("rules_channel_id"))
-
-
-def get_giveaways_channel_id(guild: discord.Guild) -> int | None:
-    settings = get_guild_settings(guild.id)
-    return parse_int(settings.get("giveaways_channel_id"))
-
-
-def get_ticket_panel_channel_id(guild: discord.Guild) -> int | None:
-    settings = get_guild_settings(guild.id)
-    return parse_int(settings.get("ticket_panel_channel_id"))
-
-
-def get_transcript_channel_id(guild: discord.Guild) -> int | None:
-    settings = get_guild_settings(guild.id)
-    return parse_int(settings.get("transcript_channel_id"))
-
-
-def get_staff_logs_channel_id(guild: discord.Guild) -> int | None:
-    settings = get_guild_settings(guild.id)
-    return parse_int(settings.get("staff_logs_channel_id"))
-
-
-def get_smart_messages(guild_id: int) -> dict[str, str]:
-    settings = get_guild_settings(guild_id)
-    messages = settings.get("smart_messages")
-
-    if not isinstance(messages, dict):
-        messages = {}
-        settings["smart_messages"] = messages
-
-    clean_messages: dict[str, str] = {}
-    for trigger, reply in messages.items():
-        if isinstance(trigger, str) and isinstance(reply, str) and trigger.strip() and reply.strip():
-            clean_messages[trigger.strip().lower()] = reply.strip()
-
-    if clean_messages != messages:
-        settings["smart_messages"] = clean_messages
-
-    return clean_messages
-
-
-def format_welcome_message(template: str, member: discord.Member) -> str:
-    return (
-        template
-        .replace("{user}", member.mention)
-        .replace("@user", member.mention)
-        .replace("{server}", member.guild.name)
-        .replace("{username}", member.name)
-        .replace("{display_name}", member.display_name)
-    )
-
-
-# ---------------- GENERAL HELPERS ----------------
-def has_staff_role(member: discord.Member) -> bool:
-    staff_role_ids = get_staff_role_ids(member.guild.id)
-    return any(role.id in staff_role_ids for role in member.roles)
-
-
-def is_staff_or_mod(member: discord.Member) -> bool:
-    return (
-        member.guild_permissions.administrator
-        or member.guild_permissions.manage_messages
-        or has_staff_role(member)
-    )
-
-
-async def get_guild_sendable_channel(guild: discord.Guild, channel_id: int) -> discord.TextChannel | None:
-    channel = guild.get_channel(channel_id)
-
-    if channel is None:
-        try:
-            channel = await guild.fetch_channel(channel_id)
-        except discord.HTTPException:
-            return None
-
-    if isinstance(channel, discord.TextChannel):
-        return channel
-
-    return None
-
-
-def mention_channel(guild: discord.Guild, channel_id: int | None) -> str:
-    if channel_id is None:
-        return "Not set"
-
-    channel = guild.get_channel(channel_id)
-    if channel is None:
-        return f"Not found: `{channel_id}`"
-
-    return channel.mention
-
-
-def mention_category(guild: discord.Guild, category_id: int | None) -> str:
-    if category_id is None:
-        return "Not set"
-
-    category = guild.get_channel(category_id)
-    if isinstance(category, discord.CategoryChannel):
-        return f"{category.name} (`{category.id}`)"
-
-    return f"Not found: `{category_id}`"
-
-
-# ---------------- PERMISSION CHECK HELPERS ----------------
-REQUIRED_PERMISSION_ITEMS: list[tuple[str, str, str]] = [
-    ("view_channel", "View Channels", "see setup/ticket/log channels"),
-    ("send_messages", "Send Messages", "send replies, welcome messages, panels, and logs"),
-    ("read_message_history", "Read Message History", "read ticket/giveaway messages"),
-    ("manage_channels", "Manage Channels", "create setup categories and ticket channels"),
-    ("manage_messages", "Manage Messages", "delete banned messages and clean commands"),
-    ("embed_links", "Embed Links", "send ticket, setup, warning, and log embeds"),
-    ("add_reactions", "Add Reactions", "add the giveaway reaction"),
-    ("kick_members", "Kick Members", "kick users after max warnings"),
-    ("ban_members", "Ban Members", "only needed if punishment mode is ban"),
-]
-
-OPTIONAL_PERMISSION_ITEMS: list[tuple[str, str, str]] = [
-    ("manage_roles", "Manage Roles", "only needed later for auto-role/rules-button features"),
-]
-
-
-def build_recommended_permissions() -> discord.Permissions:
-    permissions = discord.Permissions.none()
-
-    for permission_name, _label, _reason in REQUIRED_PERMISSION_ITEMS:
-        if hasattr(permissions, permission_name):
-            setattr(permissions, permission_name, True)
-
-    return permissions
-
-
-def permission_lines(permissions: discord.Permissions, items: list[tuple[str, str, str]]) -> list[str]:
-    lines: list[str] = []
-
-    for permission_name, label, reason in items:
-        has_permission = bool(getattr(permissions, permission_name, False))
-        icon = "✅" if has_permission else "❌"
-        lines.append(f"{icon} **{label}** — {reason}")
-
-    return lines
-
-
-def missing_permission_names(permissions: discord.Permissions) -> list[str]:
-    missing: list[str] = []
-
-    for permission_name, label, _reason in REQUIRED_PERMISSION_ITEMS:
-        if not bool(getattr(permissions, permission_name, False)):
-            missing.append(label)
-
-    return missing
-
-
-SETUP_COMPONENT_ALIASES: dict[str, str] = {
-    "ticket": "tickets",
-    "tickets": "tickets",
-    "ticketcategory": "tickets",
-    "ticketcategories": "tickets",
-    "ticketpanel": "ticketpanel",
-    "panel": "ticketpanel",
-    "openaticket": "ticketpanel",
-    "welcome": "welcome",
-    "welcomes": "welcome",
-    "rules": "rules",
-    "rule": "rules",
-    "giveaway": "giveaways",
-    "giveaways": "giveaways",
-    "gaw": "giveaways",
-    "wall": "wall",
-    "wallofknobs": "wall",
-    "knobs": "wall",
-    "guilt": "leaves",
-    "gulit": "leaves",
-    "board": "leaves",
-    "boardofguilt": "leaves",
-    "leave": "leaves",
-    "leaves": "leaves",
-    "transcript": "transcripts",
-    "transcripts": "transcripts",
-    "tickettranscript": "transcripts",
-    "tickettranscripts": "transcripts",
-    "stafflog": "stafflogs",
-    "stafflogs": "stafflogs",
-    "staff": "stafflogs",
-    "logs": "logs",
-    "info": "info",
-}
-
-SETUP_ALL_COMPONENTS = {
-    "tickets",
-    "ticketpanel",
-    "welcome",
-    "rules",
-    "giveaways",
-    "wall",
-    "leaves",
-    "transcripts",
-    "stafflogs",
-}
-
-
-def normalize_setup_word(word: str) -> str | None:
-    cleaned = re.sub(r"[^a-z0-9]", "", word.lower())
-    if not cleaned:
-        return None
-    return SETUP_COMPONENT_ALIASES.get(cleaned)
-
-
-def parse_setup_exclusions(raw: str | None) -> tuple[set[str], list[str]]:
-    if not raw or not raw.strip():
-        return set(), []
-
-    words = re.findall(r"[a-zA-Z0-9_-]+", raw.lower().replace(",", " "))
-    exclusions: set[str] = set()
-    unknown: list[str] = []
-
-    # Prefix style: !setup no giveaways no welcome
-    if "no" in words:
-        for index, word in enumerate(words):
-            if word != "no":
-                continue
-            if index + 1 >= len(words):
-                continue
-            component = normalize_setup_word(words[index + 1])
-            if component is None:
-                unknown.append(words[index + 1])
-            else:
-                exclusions.add(component)
-    else:
-        # Slash style: /setup exclude: giveaways,welcome,transcripts
-        for word in words:
-            component = normalize_setup_word(word)
-            if component is None:
-                unknown.append(word)
-            else:
-                exclusions.add(component)
-
-    if "logs" in exclusions:
-        exclusions.update({"wall", "leaves", "transcripts", "stafflogs"})
-        exclusions.discard("logs")
-
-    if "info" in exclusions:
-        exclusions.update({"welcome", "rules", "giveaways", "ticketpanel"})
-        exclusions.discard("info")
-
-    if "tickets" in exclusions:
-        exclusions.add("ticketpanel")
-
-    return exclusions, unknown
-
-
-async def get_or_create_category(guild: discord.Guild, name: str) -> discord.CategoryChannel:
-    for category in guild.categories:
-        if category.name.lower() == name.lower():
-            return category
-
-    return await guild.create_category(name=name, reason="XSI automatic setup")
-
-
-async def get_or_create_text_channel(
-    guild: discord.Guild,
-    name: str,
-    *,
-    category: discord.CategoryChannel | None = None,
-    topic: str | None = None,
-) -> discord.TextChannel:
-    normalized_name = name.lower()
-
-    for channel in guild.text_channels:
-        if channel.name.lower() == normalized_name:
-            if category is not None and channel.category_id != category.id:
-                try:
-                    await channel.edit(category=category, reason="XSI automatic setup")
-                except discord.HTTPException:
-                    pass
-            return channel
-
-    return await guild.create_text_channel(
-        name=normalized_name,
-        category=category,
-        topic=topic,
-        reason="XSI automatic setup",
-    )
-
-
-async def send_default_rules_embed(channel: discord.TextChannel) -> None:
-    embed = discord.Embed(
-        title="📜 Server Rules 📜",
-        description=(
-            "1. No BS.\n"
-            "2. No NSFW.\n"
-            "3. English only.\n"
-            "4. No scams.\n"
-            "5. Respect staff.\n"
-            "6. Use tickets for trades.\n"
-            "7. No modded accounts.\n"
-            "8. No money services or boosts.\n"
-        ),
-        color=discord.Color.red(),
-    )
-    await channel.send(embed=embed)
-
-
-def format_smart_reply(template: str, message: discord.Message) -> str:
-    guild_name = message.guild.name if message.guild is not None else "this server"
-    return (
-        template
-        .replace("{user}", message.author.mention)
-        .replace("@user", message.author.mention)
-        .replace("{server}", guild_name)
-        .replace("{username}", message.author.name)
-        .replace("{display_name}", getattr(message.author, "display_name", message.author.name))
-    )
-
-
-async def maybe_send_smart_message(message: discord.Message) -> None:
-    if message.guild is None:
-        return
-
-    content = normalize_text(message.content or "")
-    if not content:
-        return
-
-    prefixes = bot.command_prefix if isinstance(bot.command_prefix, (list, tuple)) else [bot.command_prefix]
-    if any(content.startswith(str(prefix).lower()) for prefix in prefixes):
-        return
-
-    smart_messages = get_smart_messages(message.guild.id)
-    if not smart_messages:
-        return
-
-    compact_message = compact_text(content)
-    now = time.time()
-
-    for trigger, reply in smart_messages.items():
-        trigger_normal = normalize_text(trigger)
-        trigger_compact = compact_text(trigger)
-
-        if trigger_normal not in content and trigger_compact not in compact_message:
-            continue
-
-        cooldown_key = f"{message.guild.id}:{message.channel.id}:{message.author.id}:{trigger_normal}"
-        if now - smart_message_cooldowns[cooldown_key] < SMART_MESSAGE_COOLDOWN:
-            return
-
-        smart_message_cooldowns[cooldown_key] = now
-        await message.channel.send(
-            format_smart_reply(reply, message),
-            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-        )
-        return
-
-
-# ---------------- TICKET HELPERS ----------------
-def get_ticket_category(guild: discord.Guild) -> discord.CategoryChannel | None:
-    settings = get_guild_settings(guild.id)
-    saved_category_id = parse_int(settings.get("ticket_category_id"))
-
-    if saved_category_id is not None:
-        category = guild.get_channel(saved_category_id)
-        if isinstance(category, discord.CategoryChannel):
-            return category
-
-    for category_id in DEFAULT_TICKET_CATEGORY_IDS:
-        category = guild.get_channel(category_id)
-        if isinstance(category, discord.CategoryChannel):
-            return category
-
-    return None
-
-
-def clean_channel_name(name: str) -> str:
-    name = name.lower()
-    name = re.sub(r"[^a-z0-9-]", "-", name)
-    name = re.sub(r"-+", "-", name)
-    return name.strip("-")[:40] or "user"
-
-
-def is_fily_offline_hours() -> bool:
-    now_uk = datetime.now(UK_TIMEZONE)
-    return now_uk.hour < AVAILABLE_START_HOUR or now_uk.hour >= AVAILABLE_END_HOUR
-
-
-def get_ticket_owner_display_name(channel: discord.abc.GuildChannel) -> str:
-    channel_id = str(channel.id)
-    data = ticket_owners.get(channel_id)
-
-    if isinstance(data, dict):
-        saved_name = data.get("owner_display_name")
-        if saved_name:
-            return str(saved_name)
-
-    guild = getattr(channel, "guild", None)
-    category = getattr(channel, "category", None)
-
-    if isinstance(guild, discord.Guild):
-        return get_ticket_owner_name_for_guild(guild, category if isinstance(category, discord.CategoryChannel) else None)
-
-    return DEFAULT_TICKET_OWNER_NAME
-
-
-def ticket_auto_messages_enabled(channel: discord.abc.GuildChannel) -> bool:
-    data = ticket_owners.get(str(channel.id))
-    if not isinstance(data, dict):
-        return False
-    return bool(data.get("auto_messages", False))
-
-
-def find_existing_ticket(guild: discord.Guild, user_id: int) -> discord.TextChannel | None:
-    stale_channel_ids: list[str] = []
-
-    for channel_id, data in ticket_owners.items():
-        if not isinstance(data, dict):
-            continue
-
-        saved_guild_id = parse_int(data.get("guild_id"))
-        if saved_guild_id is not None and saved_guild_id != guild.id:
-            continue
-
-        if int(data.get("owner_id", 0)) != user_id:
-            continue
-
-        try:
-            channel = guild.get_channel(int(channel_id))
-        except ValueError:
-            continue
-
-        if isinstance(channel, discord.TextChannel):
-            return channel
-
-        stale_channel_ids.append(channel_id)
-
-    for channel_id in stale_channel_ids:
-        ticket_owners.pop(channel_id, None)
-
-    if stale_channel_ids:
-        save_ticket_owners()
-
-    return None
-
-
-async def create_ticket_channel(interaction: discord.Interaction, auto_messages: bool) -> None:
-    guild = interaction.guild
-    user = interaction.user
-
-    if guild is None:
-        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
-        return
-
-    await interaction.response.defer(ephemeral=True, thinking=True)
-
-    existing_ticket = find_existing_ticket(guild, user.id)
-    if existing_ticket is not None:
-        await interaction.followup.send(f"❌ You already have a ticket: {existing_ticket.mention}")
-        return
-
-    category = get_ticket_category(guild)
-    if category is None:
-        await interaction.followup.send("❌ Ticket category not found. Admin can use `!setticketcategory` or `/setticketcategory`.")
-        return
-
-    bot_member = guild.me or guild.get_member(bot.user.id if bot.user else 0)
-
-    overwrites: dict[discord.Role | discord.Member, discord.PermissionOverwrite] = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=False),
-    }
-
-    if isinstance(user, discord.Member):
-        overwrites[user] = discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=True,
-            read_message_history=True,
-            attach_files=True,
-        )
-
-    if bot_member is not None:
-        overwrites[bot_member] = discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=True,
-            read_message_history=True,
-            manage_channels=True,
-            manage_messages=True,
-        )
-
-    for role_id in get_staff_role_ids(guild.id):
-        role = guild.get_role(role_id)
-        if role is not None:
-            overwrites[role] = discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True,
-                attach_files=True,
-            )
-
-    channel_name = f"ticket-{clean_channel_name(user.name)}-{str(user.id)[-4:]}"
-
-    try:
-        channel = await guild.create_text_channel(
-            name=channel_name,
-            category=category,
-            overwrites=overwrites,
-            reason=f"Ticket opened by {user} ({user.id})",
-        )
-    except discord.Forbidden:
-        await interaction.followup.send("❌ I do not have permission to create ticket channels.")
-        return
-    except discord.HTTPException as exc:
-        log.exception("Failed to create ticket channel: %s", exc)
-        await interaction.followup.send("❌ Discord rejected the ticket channel creation. Check my permissions and category limits.")
-        return
-
-    owner_display_name = get_ticket_owner_name_for_guild(guild, category)
-
-    ticket_owners[str(channel.id)] = {
-        "guild_id": guild.id,
-        "owner_id": user.id,
-        "last_dm_time": 0,
-        "last_away_reply_time": 0,
-        "auto_messages": auto_messages,
-        "owner_display_name": owner_display_name,
-        "created_at": int(time.time()),
-    }
-    save_ticket_owners()
-
-    if auto_messages:
-        ticket_embed = discord.Embed(
-            title="🎟️ Ticket Opened",
-            description=(
-                "Please explain what you need help with.\n\n"
-                "Availability Times: 9am to 10pm UK"
-            ),
-            color=discord.Color.green(),
-        )
-    else:
-        ticket_embed = discord.Embed(
-            title="🎫 Ticket Opened",
-            description="Please explain what you need help with.",
-            color=discord.Color.green(),
-        )
-
-    await channel.send(content=user.mention, embed=ticket_embed, view=CloseButton())
-
-    try:
-        await user.send(
-            f"🎫 Your ticket has been created in {guild.name}.\n"
-            f"Ticket: {channel.mention}"
-        )
-    except discord.HTTPException:
-        pass
-
-    await interaction.followup.send(f"✅ Created {channel.mention}")
-
-
-# ---------------- WARNING HELPERS ----------------
-def _warning_bucket(guild_id: int) -> dict[str, int]:
-    gid = str(guild_id)
-    bucket = warnings_store.get(gid)
-
-    if not isinstance(bucket, dict):
-        bucket = {}
-        warnings_store[gid] = bucket
-
-    return bucket
-
-
-def get_warnings(guild_id: int, user_id: int) -> int:
-    uid = str(user_id)
-    bucket = _warning_bucket(guild_id)
-
-    if uid in bucket:
-        return int(bucket.get(uid, 0))
-
-    # Backwards compatibility with old flat JSON format: {"user_id": warning_count}.
-    legacy_count = warnings_store.get(uid)
-    if isinstance(legacy_count, int):
-        return legacy_count
-
-    return 0
-
-
-def add_warning(guild_id: int, user_id: int) -> int:
-    bucket = _warning_bucket(guild_id)
-    uid = str(user_id)
-
-    # Migrate old flat warning data into this guild the first time that user is warned again.
-    if uid not in bucket and isinstance(warnings_store.get(uid), int):
-        bucket[uid] = int(warnings_store.pop(uid))
-
-    bucket[uid] = int(bucket.get(uid, 0)) + 1
-    save_warnings()
-    return bucket[uid]
-
-
-def clear_warnings(guild_id: int, user_id: int) -> None:
-    bucket = _warning_bucket(guild_id)
-    uid = str(user_id)
-    changed = False
-
-    if uid in bucket:
-        del bucket[uid]
-        changed = True
-
-    if uid in warnings_store:
-        warnings_store.pop(uid, None)
-        changed = True
-
-    if changed:
-        save_warnings()
-
-
-# ---------------- SMART DETECTION ----------------
+# ============================================================
+# GENERAL HELPERS
+# ============================================================
 def normalize_text(text: str) -> str:
     text = text.lower()
     text = text.replace("@\u200b", "@")
@@ -997,7 +414,6 @@ def normalize_text(text: str) -> str:
 
 def compact_text(text: str) -> str:
     text = text.lower()
-
     replacements = {
         "0": "o",
         "1": "i",
@@ -1009,11 +425,277 @@ def compact_text(text: str) -> str:
         "!": "i",
         "@": "a",
     }
-
     for old, new in replacements.items():
         text = text.replace(old, new)
-
     return re.sub(r"[^a-z0-9]", "", text)
+
+
+def clean_channel_name(name: str) -> str:
+    name = name.lower()
+    name = re.sub(r"[^a-z0-9-]", "-", name)
+    name = re.sub(r"-+", "-", name)
+    return name.strip("-")[:40] or "user"
+
+
+def has_staff_role(member: discord.Member) -> bool:
+    config = guild_config(member.guild.id)
+    staff_ids = {int(role_id) for role_id in config.get("staff_role_ids", [])}
+    return any(role.id in staff_ids for role in member.roles)
+
+
+def is_staff_or_mod(member: discord.Member) -> bool:
+    return (
+        member.guild_permissions.administrator
+        or member.guild_permissions.manage_messages
+        or has_staff_role(member)
+    )
+
+
+async def get_text_channel(guild: discord.Guild, channel_id: int | None) -> discord.TextChannel | None:
+    if not channel_id:
+        return None
+
+    channel = guild.get_channel(int(channel_id))
+    if channel is None:
+        try:
+            fetched = await guild.fetch_channel(int(channel_id))
+        except discord.HTTPException:
+            return None
+        channel = fetched
+
+    if isinstance(channel, discord.TextChannel):
+        return channel
+
+    return None
+
+
+def format_mentions_safe(text: str, member: discord.Member | discord.User, guild: discord.Guild | None) -> str:
+    display_name = getattr(member, "display_name", member.name)
+    server_name = guild.name if guild is not None else "this server"
+    return (
+        text.replace("{user}", member.mention)
+        .replace("{username}", member.name)
+        .replace("{display_name}", display_name)
+        .replace("{server}", server_name)
+    )
+
+
+async def send_staff_log(guild: discord.Guild, text: str) -> None:
+    config = guild_config(guild.id)
+    channel = await get_text_channel(guild, config.get("staff_log_channel_id"))
+    if channel is None:
+        return
+    try:
+        await channel.send(text, allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException:
+        pass
+
+
+# ============================================================
+# TIME / AVAILABILITY HELPERS
+# ============================================================
+def parse_time_to_minutes(value: str) -> int:
+    raw = value.strip().lower().replace(".", "")
+    raw = re.sub(r"\s+", "", raw)
+
+    match = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?(am|pm)?", raw)
+    if not match:
+        raise ValueError("Use times like 9am, 10pm, 15:30, or 3:30pm.")
+
+    hour = int(match.group(1))
+    minute = int(match.group(2) or 0)
+    suffix = match.group(3)
+
+    if minute < 0 or minute > 59:
+        raise ValueError("Minute must be between 00 and 59.")
+
+    if suffix:
+        if hour < 1 or hour > 12:
+            raise ValueError("12-hour time must be between 1 and 12.")
+        if suffix == "am":
+            hour = 0 if hour == 12 else hour
+        else:
+            hour = 12 if hour == 12 else hour + 12
+    else:
+        if hour < 0 or hour > 23:
+            raise ValueError("24-hour time must be between 0 and 23.")
+
+    return hour * 60 + minute
+
+
+def format_minutes(minutes: int) -> str:
+    minutes = minutes % (24 * 60)
+    hour = minutes // 60
+    minute = minutes % 60
+    suffix = "am" if hour < 12 else "pm"
+    h12 = hour % 12 or 12
+    if minute == 0:
+        return f"{h12}{suffix}"
+    return f"{h12}:{minute:02d}{suffix}"
+
+
+def format_dt(dt: datetime) -> str:
+    return dt.strftime("%-I:%M%p").lower().replace(":00", "")
+
+
+def minutes_between(now_minutes: int, start_minutes: int, end_minutes: int) -> bool:
+    if start_minutes == end_minutes:
+        return True
+    if start_minutes < end_minutes:
+        return start_minutes <= now_minutes < end_minutes
+    return now_minutes >= start_minutes or now_minutes < end_minutes
+
+
+def get_timezone(config: dict[str, Any]) -> ZoneInfo:
+    availability = config.get("availability", {})
+    tz_name = availability.get("timezone", DEFAULT_TIMEZONE) if isinstance(availability, dict) else DEFAULT_TIMEZONE
+    try:
+        return ZoneInfo(str(tz_name))
+    except Exception:
+        return UK_TIMEZONE
+
+
+def make_unavailable_window(config: dict[str, Any], start_time: str, end_time: str) -> tuple[datetime, datetime]:
+    tz = get_timezone(config)
+    now = datetime.now(tz)
+    start_minutes = parse_time_to_minutes(start_time)
+    end_minutes = parse_time_to_minutes(end_time)
+
+    start_dt = now.replace(hour=start_minutes // 60, minute=start_minutes % 60, second=0, microsecond=0)
+    end_dt = now.replace(hour=end_minutes // 60, minute=end_minutes % 60, second=0, microsecond=0)
+
+    if end_dt <= start_dt:
+        end_dt += timedelta(days=1)
+
+    # If the full window is already over today, schedule it for tomorrow.
+    if now > end_dt:
+        start_dt += timedelta(days=1)
+        end_dt += timedelta(days=1)
+
+    return start_dt, end_dt
+
+
+def get_availability_state(guild_id: int) -> dict[str, Any]:
+    config = guild_config(guild_id)
+    tz = get_timezone(config)
+    now = datetime.now(tz)
+
+    temp = config.get("temporary_unavailable")
+    if isinstance(temp, dict):
+        try:
+            start_dt = datetime.fromisoformat(str(temp.get("start_iso")))
+            end_dt = datetime.fromisoformat(str(temp.get("end_iso")))
+        except Exception:
+            start_dt = None
+            end_dt = None
+
+        if start_dt is not None and end_dt is not None:
+            if start_dt <= now < end_dt:
+                return {
+                    "status": "temporary_unavailable",
+                    "available": False,
+                    "title": "Currently Unavailable",
+                    "panel_line": f"Unavailable until {format_dt(end_dt)} UK",
+                    "message": str(temp.get("message") or DEFAULT_UNAVAILABLE_MESSAGE),
+                    "until": end_dt,
+                }
+            if now >= end_dt:
+                # Mark expired; caller may save during refresher/commands.
+                pass
+
+    availability = config.get("availability", {})
+    if not isinstance(availability, dict):
+        availability = default_guild_config()["availability"]
+
+    start_text = str(availability.get("start") or DEFAULT_AVAILABLE_START)
+    end_text = str(availability.get("end") or DEFAULT_AVAILABLE_END)
+    enabled = bool(availability.get("enabled", True))
+
+    try:
+        start_minutes = parse_time_to_minutes(start_text)
+        end_minutes = parse_time_to_minutes(end_text)
+    except ValueError:
+        start_text = DEFAULT_AVAILABLE_START
+        end_text = DEFAULT_AVAILABLE_END
+        start_minutes = parse_time_to_minutes(start_text)
+        end_minutes = parse_time_to_minutes(end_text)
+
+    now_minutes = now.hour * 60 + now.minute
+    currently_available = enabled and minutes_between(now_minutes, start_minutes, end_minutes)
+    normal_line = f"Availability Times: {format_minutes(start_minutes)} to {format_minutes(end_minutes)} UK"
+
+    if currently_available:
+        return {
+            "status": "available",
+            "available": True,
+            "title": "Available",
+            "panel_line": normal_line,
+            "message": "Staff are available right now.",
+            "until": None,
+        }
+
+    return {
+        "status": "outside_hours",
+        "available": False,
+        "title": "Currently Offline",
+        "panel_line": normal_line,
+        "message": f"I am currently offline. Available hours are {format_minutes(start_minutes)} to {format_minutes(end_minutes)} UK.",
+        "until": None,
+    }
+
+
+async def cleanup_expired_unavailable(guild_id: int) -> bool:
+    config = guild_config(guild_id)
+    temp = config.get("temporary_unavailable")
+    if not isinstance(temp, dict):
+        return False
+
+    tz = get_timezone(config)
+    now = datetime.now(tz)
+    try:
+        end_dt = datetime.fromisoformat(str(temp.get("end_iso")))
+    except Exception:
+        config["temporary_unavailable"] = None
+        return True
+
+    if now >= end_dt:
+        config["temporary_unavailable"] = None
+        return True
+
+    return False
+
+
+# ============================================================
+# WARNING / MODERATION HELPERS
+# ============================================================
+def _warning_bucket(guild_id: int) -> dict[str, int]:
+    gid = str(guild_id)
+    bucket = warnings_store.get(gid)
+    if not isinstance(bucket, dict):
+        bucket = {}
+        warnings_store[gid] = bucket
+    return bucket
+
+
+def get_warnings(guild_id: int, user_id: int) -> int:
+    bucket = _warning_bucket(guild_id)
+    return int(bucket.get(str(user_id), 0))
+
+
+async def add_warning(guild_id: int, user_id: int) -> int:
+    async with warnings_lock:
+        bucket = _warning_bucket(guild_id)
+        uid = str(user_id)
+        bucket[uid] = int(bucket.get(uid, 0)) + 1
+        await save_warnings()
+        return bucket[uid]
+
+
+async def clear_warnings_for(guild_id: int, user_id: int) -> None:
+    async with warnings_lock:
+        bucket = _warning_bucket(guild_id)
+        bucket.pop(str(user_id), None)
+        await save_warnings()
 
 
 def detect_offence(message_content: str) -> str | None:
@@ -1023,10 +705,8 @@ def detect_offence(message_content: str) -> str | None:
     for phrase in BANNED_PHRASES:
         phrase_normal = normalize_text(phrase)
         phrase_compact = compact_text(phrase)
-
         if phrase_normal in normal:
             return f"Banned phrase: {phrase}"
-
         if phrase_compact and phrase_compact in compact:
             return f"Banned phrase: {phrase}"
 
@@ -1036,8 +716,6 @@ def detect_offence(message_content: str) -> str | None:
 def is_spam(guild_id: int, channel_id: int, user_id: int, content: str) -> bool:
     now = time.time()
     clean_content = normalize_text(content)
-
-    # Ignore blank/attachment-only messages.
     if not clean_content:
         return False
 
@@ -1052,7 +730,6 @@ def is_spam(guild_id: int, channel_id: int, user_id: int, content: str) -> bool:
     return same_messages >= SPAM_LIMIT
 
 
-# ---------------- WALL LOG ----------------
 async def send_wall_log(
     member: discord.Member,
     offence: str,
@@ -1061,16 +738,11 @@ async def send_wall_log(
     warning_count: int,
     moderator: discord.Member | discord.User | None = None,
 ) -> None:
-    channel_id = get_wall_channel_id(member.guild)
-
-    if channel_id is None:
-        log.warning("Wall of Knobs channel not configured for guild: %s", member.guild.id)
-        return
-
-    channel = await get_guild_sendable_channel(member.guild, channel_id)
-
+    config = guild_config(member.guild.id)
+    channel = await get_text_channel(member.guild, config.get("wall_channel_id"))
     if channel is None:
-        log.warning("Wall of Knobs channel not found or not sendable: %s", channel_id)
+        channel = await get_text_channel(member.guild, config.get("guilt_channel_id"))
+    if channel is None:
         return
 
     embed = discord.Embed(
@@ -1078,7 +750,6 @@ async def send_wall_log(
         description="Another rule breaker has been added to the wall.",
         color=discord.Color.red(),
     )
-
     embed.add_field(name="Their @", value=member.mention, inline=False)
     embed.add_field(name="Display Name", value=member.display_name, inline=True)
     embed.add_field(name="Username", value=str(member), inline=True)
@@ -1117,7 +788,6 @@ async def punish_if_needed(
         return True
 
     bot_member = guild.me or guild.get_member(bot.user.id if bot.user else 0)
-
     if bot_member is None:
         await channel.send("❌ I could not check my role hierarchy.")
         return True
@@ -1132,7 +802,6 @@ async def punish_if_needed(
         if not bot_member.guild_permissions.ban_members:
             await channel.send("❌ I need the Ban Members permission.")
             return True
-
         try:
             await member.send(
                 f"🔨 You were banned from {guild.name}.\n"
@@ -1141,9 +810,8 @@ async def punish_if_needed(
             )
         except discord.HTTPException:
             pass
-
         await member.ban(reason=f"Reached {MAX_WARNINGS} warnings. Last offence: {offence}")
-        clear_warnings(guild.id, member.id)
+        await clear_warnings_for(guild.id, member.id)
         return True
 
     if not bot_member.guild_permissions.kick_members:
@@ -1158,34 +826,320 @@ async def punish_if_needed(
         )
     except discord.HTTPException:
         pass
-
     await member.kick(reason=f"Reached {MAX_WARNINGS} warnings. Last offence: {offence}")
-    clear_warnings(guild.id, member.id)
+    await clear_warnings_for(guild.id, member.id)
     return True
 
 
-# ---------------- TICKET BUTTONS ----------------
+# ============================================================
+# TICKET HELPERS
+# ============================================================
+def get_ticket_category(guild: discord.Guild) -> discord.CategoryChannel | None:
+    config = guild_config(guild.id)
+    category_id = config.get("ticket_category_id")
+    if category_id:
+        category = guild.get_channel(int(category_id))
+        if isinstance(category, discord.CategoryChannel):
+            return category
+
+    category = discord.utils.get(guild.categories, name="XSI Tickets")
+    return category
+
+
+def find_existing_ticket(guild: discord.Guild, user_id: int) -> discord.TextChannel | None:
+    stale_channel_ids: list[str] = []
+    for channel_id, data in ticket_owners.items():
+        if not isinstance(data, dict):
+            continue
+        if int(data.get("owner_id", 0)) != user_id:
+            continue
+        if int(data.get("guild_id", 0)) != guild.id:
+            continue
+        try:
+            channel = guild.get_channel(int(channel_id))
+        except ValueError:
+            continue
+        if isinstance(channel, discord.TextChannel):
+            return channel
+        stale_channel_ids.append(channel_id)
+
+    for channel_id in stale_channel_ids:
+        ticket_owners.pop(channel_id, None)
+    if stale_channel_ids:
+        save_json(TICKET_OWNERS_FILE, ticket_owners)
+    return None
+
+
+def staff_role_objects(guild: discord.Guild) -> list[discord.Role]:
+    config = guild_config(guild.id)
+    role_ids = config.get("staff_role_ids", [])
+    roles: list[discord.Role] = []
+    for role_id in role_ids:
+        role = guild.get_role(int(role_id))
+        if role is not None:
+            roles.append(role)
+    return roles
+
+
+def ticket_panel_embed(guild_id: int, normal: bool = True) -> discord.Embed:
+    state = get_availability_state(guild_id)
+    color = discord.Color.green() if state["available"] else discord.Color.orange()
+
+    if normal:
+        title = "🎟️ Open a Ticket"
+        description = "Click the button below to open a ticket.\n\n" + state["panel_line"]
+    else:
+        title = "🎫 Open a Ticket"
+        description = "Click the button below to create a ticket."
+
+    if not state["available"] and normal:
+        description += f"\n\n⚠️ {state['title']}: {state['message']}"
+
+    return discord.Embed(title=title, description=description, color=color)
+
+
+async def send_or_update_ticket_panel(
+    guild: discord.Guild,
+    channel: discord.TextChannel | None = None,
+    *,
+    force_new: bool = False,
+) -> discord.Message | None:
+    config = guild_config(guild.id)
+
+    if channel is None:
+        channel = await get_text_channel(guild, config.get("ticket_panel_channel_id"))
+
+    if channel is None:
+        return None
+
+    embed = ticket_panel_embed(guild.id, normal=True)
+    message_id = config.get("ticket_panel_message_id")
+
+    if message_id and not force_new:
+        try:
+            message = await channel.fetch_message(int(message_id))
+            await message.edit(embed=embed, view=TicketsButton())
+            return message
+        except discord.HTTPException:
+            pass
+
+    message = await channel.send(embed=embed, view=TicketsButton())
+    config["ticket_panel_channel_id"] = channel.id
+    config["ticket_panel_message_id"] = message.id
+    await save_server_settings()
+    return message
+
+
+async def create_ticket_channel(interaction: discord.Interaction, auto_messages: bool) -> None:
+    guild = interaction.guild
+    user = interaction.user
+
+    if guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    existing_ticket = find_existing_ticket(guild, user.id)
+    if existing_ticket is not None:
+        await interaction.followup.send(f"❌ You already have a ticket: {existing_ticket.mention}")
+        return
+
+    category = get_ticket_category(guild)
+    if category is None:
+        await interaction.followup.send("❌ Ticket category not found. Run `/setup` or `/setticketcategory` first.")
+        return
+
+    bot_member = guild.me or guild.get_member(bot.user.id if bot.user else 0)
+    overwrites: dict[discord.Role | discord.Member, discord.PermissionOverwrite] = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+    }
+
+    if isinstance(user, discord.Member):
+        overwrites[user] = discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+            attach_files=True,
+        )
+
+    if bot_member is not None:
+        overwrites[bot_member] = discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+            manage_channels=True,
+            manage_messages=True,
+        )
+
+    for role in staff_role_objects(guild):
+        overwrites[role] = discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+            attach_files=True,
+        )
+
+    channel_name = f"ticket-{clean_channel_name(user.name)}-{str(user.id)[-4:]}"
+
+    try:
+        channel = await guild.create_text_channel(
+            name=channel_name,
+            category=category,
+            overwrites=overwrites,
+            reason=f"Ticket opened by {user} ({user.id})",
+        )
+    except discord.Forbidden:
+        await interaction.followup.send("❌ I do not have permission to create ticket channels.")
+        return
+    except discord.HTTPException as exc:
+        log.exception("Failed to create ticket channel: %s", exc)
+        await interaction.followup.send("❌ Discord rejected the ticket channel creation. Check permissions/category limits.")
+        return
+
+    async with tickets_lock:
+        ticket_owners[str(channel.id)] = {
+            "guild_id": guild.id,
+            "owner_id": user.id,
+            "last_dm_time": 0,
+            "last_away_reply_time": 0,
+            "auto_messages": auto_messages,
+            "created_at": int(time.time()),
+            "claimed_by": None,
+        }
+        await save_ticket_owners()
+
+    state = get_availability_state(guild.id)
+    if auto_messages:
+        description = "Please explain what you need help with.\n\n" + state["panel_line"]
+        if not state["available"]:
+            description += f"\n\n⚠️ {state['title']}: {state['message']}"
+        ticket_embed = discord.Embed(title="🎟️ Ticket Opened", description=description, color=discord.Color.green())
+    else:
+        ticket_embed = discord.Embed(
+            title="🎫 Ticket Opened",
+            description="Please explain what you need help with.",
+            color=discord.Color.green(),
+        )
+
+    ticket_embed.add_field(name="Opened By", value=user.mention, inline=True)
+    ticket_embed.add_field(name="Status", value="Open", inline=True)
+    ticket_embed.add_field(name="Claimed By", value="Not claimed", inline=True)
+
+    await channel.send(content=user.mention, embed=ticket_embed, view=CloseButton())
+
+    try:
+        await user.send(f"🎫 Your ticket has been created in {guild.name}.\nTicket: {channel.mention}")
+    except discord.HTTPException:
+        pass
+
+    await interaction.followup.send(f"✅ Created {channel.mention}")
+
+
+async def delete_message_later(message: discord.Message, seconds: int) -> None:
+    await asyncio.sleep(seconds)
+    try:
+        await message.delete()
+    except discord.HTTPException:
+        pass
+
+
+async def maybe_dm_ticket_owner(message: discord.Message) -> None:
+    if not isinstance(message.channel, discord.TextChannel) or message.guild is None:
+        return
+
+    data = ticket_owners.get(str(message.channel.id))
+    if not isinstance(data, dict):
+        return
+    if not bool(data.get("auto_messages", False)):
+        return
+
+    owner_id = int(data.get("owner_id", 0))
+    if owner_id == message.author.id:
+        return
+    if message.author.id not in OWNER_USER_IDS:
+        return
+
+    now = time.time()
+    last_dm_time = float(data.get("last_dm_time", 0))
+    if now - last_dm_time < TICKET_DM_COOLDOWN:
+        return
+
+    try:
+        owner = message.guild.get_member(owner_id) or await message.guild.fetch_member(owner_id)
+    except discord.HTTPException:
+        return
+
+    try:
+        await owner.send(
+            "📩 Ticket Update\n\n"
+            f"{message.author.display_name} has replied to your ticket in {message.guild.name}.\n\n"
+            f"Ticket: {message.channel.mention}\n\n"
+            "Please check it when you can."
+        )
+        data["last_dm_time"] = now
+        ticket_owners[str(message.channel.id)] = data
+        await save_ticket_owners()
+    except discord.HTTPException:
+        pass
+
+
+async def maybe_send_unavailable_ticket_reply(message: discord.Message) -> None:
+    if not isinstance(message.channel, discord.TextChannel) or message.guild is None:
+        return
+
+    channel_id = str(message.channel.id)
+    data = ticket_owners.get(channel_id)
+    if not isinstance(data, dict):
+        return
+    if not bool(data.get("auto_messages", False)):
+        return
+
+    owner_id = int(data.get("owner_id", 0))
+    if message.author.id != owner_id:
+        return
+
+    state = get_availability_state(message.guild.id)
+    if state["available"]:
+        return
+
+    now = time.time()
+    last_away_reply_time = float(data.get("last_away_reply_time", 0))
+    if now - last_away_reply_time < AWAY_AUTO_REPLY_COOLDOWN:
+        return
+
+    away_msg = await message.channel.send(
+        f"{message.author.mention}\n"
+        f"⏰ XSI staff are currently unavailable.\n\n"
+        f"{state['message']}\n"
+        f"{state['panel_line']}",
+        allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+    )
+
+    data["last_away_reply_time"] = now
+    ticket_owners[channel_id] = data
+    await save_ticket_owners()
+    asyncio.create_task(delete_message_later(away_msg, AWAY_AUTO_REPLY_DELETE_AFTER))
+
+
+# ============================================================
+# BUTTON VIEWS
+# ============================================================
 class CloseButton(discord.ui.View):
     def __init__(self) -> None:
         super().__init__(timeout=None)
 
-    @discord.ui.button(
-        label="Close Ticket",
-        style=discord.ButtonStyle.red,
-        custom_id="merged_close_ticket",
-    )
+    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.red, custom_id="xsi_close_ticket")
     async def close(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not isinstance(interaction.channel, discord.TextChannel):
             await interaction.response.send_message("❌ This button only works inside ticket channels.", ephemeral=True)
             return
-
         if not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
             return
 
         channel_id = str(interaction.channel.id)
         data = ticket_owners.get(channel_id)
-
         if not isinstance(data, dict):
             await interaction.response.send_message("❌ This does not look like a tracked ticket channel.", ephemeral=True)
             return
@@ -1197,14 +1151,12 @@ class CloseButton(discord.ui.View):
             or interaction.user.guild_permissions.administrator
             or has_staff_role(interaction.user)
         )
-
         if not allowed:
             await interaction.response.send_message("❌ Only the ticket owner or staff can close this ticket.", ephemeral=True)
             return
 
         ticket_owners.pop(channel_id, None)
-        save_ticket_owners()
-
+        await save_ticket_owners()
         await interaction.response.send_message("Closing ticket...", ephemeral=True)
         await asyncio.sleep(2)
 
@@ -1218,11 +1170,7 @@ class TicketsButton(discord.ui.View):
     def __init__(self) -> None:
         super().__init__(timeout=None)
 
-    @discord.ui.button(
-        label="🎟️ Open Ticket",
-        style=discord.ButtonStyle.green,
-        custom_id="tickets_system_create_ticket",
-    )
+    @discord.ui.button(label="🎟️ Open Ticket", style=discord.ButtonStyle.green, custom_id="xsi_create_ticket_auto")
     async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await create_ticket_channel(interaction, auto_messages=True)
 
@@ -1231,506 +1179,177 @@ class Tickets2Button(discord.ui.View):
     def __init__(self) -> None:
         super().__init__(timeout=None)
 
-    @discord.ui.button(
-        label="🎫 Create Ticket",
-        style=discord.ButtonStyle.green,
-        custom_id="tickets2_normal_create_ticket",
-    )
+    @discord.ui.button(label="🎫 Create Ticket", style=discord.ButtonStyle.green, custom_id="xsi_create_ticket_basic")
     async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await create_ticket_channel(interaction, auto_messages=False)
 
 
-# ---------------- READY / SYNC ----------------
-async def sync_commands_for_guild(guild: discord.Guild) -> int:
-    bot.tree.copy_global_to(guild=guild)
-    synced = await bot.tree.sync(guild=guild)
-    return len(synced)
+# ============================================================
+# SETUP HELPERS
+# ============================================================
+def parse_setup_exclusions(text: str | None) -> set[str]:
+    if not text:
+        return set()
+
+    raw = text.lower().replace(",", " ")
+    words = [word.strip() for word in raw.split() if word.strip()]
+    skips: set[str] = set()
+    next_is_skip = False
+
+    for word in words:
+        word = word.strip("!?.;:,_-")
+        if word in {"no", "skip", "without", "exclude"}:
+            next_is_skip = True
+            continue
+        normalized = SKIP_ALIASES.get(word, word)
+        if normalized in SETUP_COMPONENTS:
+            if next_is_skip or "no" in words or "skip" in words or "exclude" in words or "without" in words:
+                skips.add(normalized)
+        next_is_skip = False
+
+    # If a whole category is skipped, skip its children.
+    if "tickets" in skips:
+        skips.add("ticketpanel")
+    if "logs" in skips:
+        skips.update({"wall", "guilt", "leaves", "transcripts", "stafflogs"})
+    if "info" in skips:
+        skips.update({"welcome", "rules", "giveaways"})
+    return skips
 
 
-@bot.event
-async def on_ready() -> None:
-    if not bot.views_added:
-        bot.add_view(TicketsButton())
-        bot.add_view(Tickets2Button())
-        bot.add_view(CloseButton())
-        bot.views_added = True
+async def get_or_create_category(guild: discord.Guild, name: str, config: dict[str, Any]) -> discord.CategoryChannel:
+    existing = discord.utils.get(guild.categories, name=name)
+    if existing is not None:
+        return existing
+    category = await guild.create_category(name=name, reason="XSI setup")
+    add_created_category(config, category.id)
+    return category
 
-    log.info("----------------------------")
-    log.info("✅ Merged Bot logged in as %s", bot.user)
-    log.info("----------------------------")
 
-    if not bot.synced:
-        for guild in bot.guilds:
+async def get_or_create_text_channel(
+    guild: discord.Guild,
+    name: str,
+    category: discord.CategoryChannel | None,
+    config: dict[str, Any],
+    *,
+    topic: str | None = None,
+) -> discord.TextChannel:
+    existing = discord.utils.get(guild.text_channels, name=name)
+    if existing is not None:
+        if category is not None and existing.category_id != category.id:
             try:
-                count = await sync_commands_for_guild(guild)
-                log.info("✅ Synced %s slash command(s) in %s", count, guild.name)
-            except discord.HTTPException as exc:
-                log.exception("❌ Slash sync failed in %s: %s", guild.name, exc)
-
-        bot.synced = True
-
-
-@bot.event
-async def on_guild_join(guild: discord.Guild) -> None:
-    try:
-        count = await sync_commands_for_guild(guild)
-        log.info("✅ Synced %s slash command(s) after joining %s", count, guild.name)
-    except discord.HTTPException as exc:
-        log.exception("❌ Slash sync failed after joining %s: %s", guild.name, exc)
-
-
-# ---------------- WELCOME / BOARD OF GUILT ----------------
-@bot.event
-async def on_member_join(member: discord.Member) -> None:
-    channel_id = get_welcome_channel_id(member.guild)
-
-    if channel_id is None:
-        return
-
-    channel = await get_guild_sendable_channel(member.guild, channel_id)
-
-    if channel is None:
-        log.warning("Welcome channel not found or not sendable: %s", channel_id)
-        return
-
-    message = format_welcome_message(get_welcome_message(member.guild), member)
-
-    await channel.send(
-        message,
-        allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-    )
-
-
-@bot.event
-async def on_member_remove(member: discord.Member) -> None:
-    channel_id = get_guilt_channel_id(member.guild)
-
-    if channel_id is None:
-        log.warning("Board of Guilt channel not configured for guild: %s", member.guild.id)
-        return
-
-    channel = await get_guild_sendable_channel(member.guild, channel_id)
-
-    if channel is None:
-        log.warning("Board of Guilt channel not found or not sendable: %s", channel_id)
-        return
-
-    embed = discord.Embed(
-        title="⚖️ Board of Guilt",
-        description=(
-            f"💀 {member.name} left the server...\n\n"
-            "Their name shall stay here forever."
-        ),
-        color=discord.Color.red(),
-    )
-
-    embed.add_field(name="Username", value=member.name, inline=True)
-    embed.add_field(name="Display Name", value=member.display_name, inline=True)
-    embed.add_field(name="User ID", value=str(member.id), inline=False)
-    embed.set_thumbnail(url=member.display_avatar.url)
-
-    await channel.send(content=f"bye I guess... <@{member.id}>", embed=embed)
-
-
-# ---------------- TICKET AUTO MESSAGES ----------------
-async def delete_message_later(message: discord.Message, seconds: int) -> None:
-    await asyncio.sleep(seconds)
-
-    try:
-        await message.delete()
-    except discord.HTTPException:
-        pass
-
-
-async def maybe_dm_ticket_owner(message: discord.Message) -> None:
-    if not isinstance(message.channel, discord.TextChannel):
-        return
-
-    if not isinstance(message.author, discord.Member):
-        return
-
-    channel_id = str(message.channel.id)
-    data = ticket_owners.get(channel_id)
-
-    if not isinstance(data, dict):
-        return
-
-    if not ticket_auto_messages_enabled(message.channel):
-        return
-
-    owner_id = int(data.get("owner_id", 0))
-
-    # Do not DM the owner if they are the one replying.
-    if owner_id == message.author.id:
-        return
-
-    # Ticket updates can be triggered by your owner ID or by configured staff/mods.
-    if message.author.id not in OWNER_USER_IDS and not is_staff_or_mod(message.author):
-        return
-
-    now = time.time()
-    last_dm_time = float(data.get("last_dm_time", 0))
-
-    # Only DM once per hour per ticket.
-    if now - last_dm_time < TICKET_DM_COOLDOWN:
-        return
-
-    owner = message.guild.get_member(owner_id) if message.guild else None
-
-    if owner is None and message.guild is not None:
-        try:
-            owner = await message.guild.fetch_member(owner_id)
-        except discord.HTTPException:
-            return
-
-    if owner is None:
-        return
-
-    try:
-        await owner.send(
-            "📩 Ticket Update\n\n"
-            f"{message.author.display_name} has replied to your ticket in {message.guild.name}.\n\n"
-            f"Ticket: {message.channel.mention}\n\n"
-            "Please check it when you can."
-        )
-
-        data["last_dm_time"] = now
-        ticket_owners[channel_id] = data
-        save_ticket_owners()
-    except discord.HTTPException:
-        pass
-
-
-async def maybe_send_away_auto_reply(message: discord.Message) -> None:
-    if not isinstance(message.channel, discord.TextChannel):
-        return
-
-    channel_id = str(message.channel.id)
-    data = ticket_owners.get(channel_id)
-
-    if not isinstance(data, dict):
-        return
-
-    if not ticket_auto_messages_enabled(message.channel):
-        return
-
-    owner_id = int(data.get("owner_id", 0))
-
-    # Only auto-reply when the ticket owner sends a message.
-    if message.author.id != owner_id:
-        return
-
-    # Only outside 9am to 10pm UK.
-    if not is_fily_offline_hours():
-        return
-
-    now = time.time()
-    last_away_reply_time = float(data.get("last_away_reply_time", 0))
-
-    # Cooldown, not an automatic timer.
-    if now - last_away_reply_time < AWAY_AUTO_REPLY_COOLDOWN:
-        return
-
-    owner_display_name = get_ticket_owner_display_name(message.channel)
-
-    away_msg = await message.channel.send(
-        f"{message.author.mention}\n"
-        f"⏰ {owner_display_name} is currently offline.\n\n"
-        "Available hours are 9:00 AM - 10:00 PM UK time.\n"
-        f"{owner_display_name} will reply when they’re back online.",
-        allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-    )
-
-    data["last_away_reply_time"] = now
-    ticket_owners[channel_id] = data
-    save_ticket_owners()
-
-    asyncio.create_task(delete_message_later(away_msg, AWAY_AUTO_REPLY_DELETE_AFTER))
-
-
-# ---------------- AUTO MODERATION ----------------
-@bot.event
-async def on_message(message: discord.Message) -> None:
-    if message.author.bot:
-        return
-
-    if message.guild is None or not isinstance(message.author, discord.Member):
-        return
-
-    await maybe_dm_ticket_owner(message)
-    await maybe_send_away_auto_reply(message)
-    await maybe_send_smart_message(message)
-
-    member = message.author
-
-    if is_staff_or_mod(member):
-        await bot.process_commands(message)
-        return
-
-    content = message.content or ""
-    offence = detect_offence(content)
-
-    if offence is None and is_spam(message.guild.id, message.channel.id, member.id, content):
-        offence = "Spam / repeated messages"
-
-    if offence is not None:
-        warning_count = add_warning(message.guild.id, member.id)
-
-        try:
-            await message.delete()
-        except discord.Forbidden:
-            await message.channel.send("❌ I need Manage Messages permission.")
-        except discord.HTTPException:
-            pass
-
-        if warning_count >= MAX_WARNINGS:
-            punishment = "Banned" if PUNISHMENT_ON_MAX_WARNINGS.lower() == "ban" else "Kicked"
-
-            await send_wall_log(
-                member=member,
-                offence=offence,
-                punishment=punishment,
-                message_content=content,
-                warning_count=warning_count,
-            )
-
-            try:
-                await punish_if_needed(message.guild, message.channel, member, offence, warning_count)
-            except discord.Forbidden:
-                await message.channel.send(f"❌ I do not have permission to punish {member.mention}.")
-            except discord.HTTPException as exc:
-                log.exception("Punishment failed: %s", exc)
-                await message.channel.send("❌ Something went wrong while punishing.")
-
-            return
-
-        await send_wall_log(
-            member=member,
-            offence=offence,
-            punishment="Warning",
-            message_content=content,
-            warning_count=warning_count,
-        )
-
-        await message.channel.send(
-            f"⚠️ {member.mention}, warning {warning_count}/{MAX_WARNINGS} — {offence}.\n"
-            "Your message was deleted."
-        )
-        return
-
-    await bot.process_commands(message)
-
-
-# ---------------- SETUP COMMAND HELPERS ----------------
-async def set_guilt_channel_from_command(ctx: commands.Context, channel: Optional[discord.TextChannel]) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
-        return
-
-    target = channel
-    if target is None:
-        if isinstance(ctx.channel, discord.TextChannel):
-            target = ctx.channel
-        else:
-            await ctx.send("❌ Please choose a text channel.")
-            return
-
-    settings = get_guild_settings(ctx.guild.id)
-    settings["guilt_channel_id"] = target.id
-    settings["leaves_channel_id"] = target.id
-    save_server_settings()
-
-    await ctx.send(f"✅ Leaves / Board of Guilt channel set to {target.mention}.")
-
-
-# ---------------- AUTO SETUP COMMAND ----------------
-@bot.hybrid_command(name="setup", description="Automatically create XSI categories/channels. Use 'no giveaways' etc. to skip parts.")
-@commands.has_permissions(administrator=True)
-@app_commands.describe(exclude="Optional skip list, for example: giveaways,welcome,transcripts")
-async def setup(ctx: commands.Context, *, exclude: Optional[str] = None) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
-        return
-
-    exclusions, unknown = parse_setup_exclusions(exclude)
-
-    if ctx.interaction is not None:
-        await ctx.defer()
-
-    settings = get_guild_settings(ctx.guild.id)
-    created: list[str] = []
-    used_existing: list[str] = []
-    skipped: list[str] = []
-
-    try:
-        tickets_category: discord.CategoryChannel | None = None
-        logs_category: discord.CategoryChannel | None = None
-        info_category: discord.CategoryChannel | None = None
-
-        needs_tickets_category = "tickets" not in exclusions
-        needs_logs_category = any(part not in exclusions for part in ["wall", "leaves", "transcripts", "stafflogs"])
-        needs_info_category = any(part not in exclusions for part in ["welcome", "rules", "giveaways", "ticketpanel"])
-
-        if needs_tickets_category:
-            before = len(ctx.guild.categories)
-            tickets_category = await get_or_create_category(ctx.guild, "XSI Tickets")
-            settings["ticket_category_id"] = tickets_category.id
-            (created if len(ctx.guild.categories) > before else used_existing).append(f"Ticket Category: **{tickets_category.name}**")
-        else:
-            skipped.append("Ticket Category")
-
-        if needs_logs_category:
-            before = len(ctx.guild.categories)
-            logs_category = await get_or_create_category(ctx.guild, "XSI Logs")
-            (created if len(ctx.guild.categories) > before else used_existing).append(f"Logs Category: **{logs_category.name}**")
-
-        if needs_info_category:
-            before = len(ctx.guild.categories)
-            info_category = await get_or_create_category(ctx.guild, "XSI Info")
-            (created if len(ctx.guild.categories) > before else used_existing).append(f"Info Category: **{info_category.name}**")
-
-        if "ticketpanel" not in exclusions and tickets_category is not None and info_category is not None:
-            before = len(ctx.guild.text_channels)
-            ticket_panel = await get_or_create_text_channel(
-                ctx.guild,
+                await existing.edit(category=category, reason="XSI setup organize channel")
+            except discord.HTTPException:
+                pass
+        return existing
+
+    channel = await guild.create_text_channel(name=name, category=category, topic=topic, reason="XSI setup")
+    add_created_channel(config, channel.id)
+    return channel
+
+
+async def run_setup(guild: discord.Guild, channel: discord.abc.Messageable, exclusions: set[str]) -> discord.Embed:
+    config = guild_config(guild.id)
+    created_lines: list[str] = []
+    skipped_lines: list[str] = []
+
+    # Tickets category + ticket panel under tickets category.
+    tickets_category: discord.CategoryChannel | None = None
+    if "tickets" not in exclusions:
+        tickets_category = await get_or_create_category(guild, "XSI Tickets", config)
+        config["ticket_category_id"] = tickets_category.id
+        created_lines.append(f"📁 Ticket Category: {tickets_category.name}")
+
+        if "ticketpanel" not in exclusions:
+            panel_channel = await get_or_create_text_channel(
+                guild,
                 "open-a-ticket",
-                category=info_category,
-                topic="Open a ticket here.",
+                tickets_category,
+                config,
+                topic="Open support/trade tickets here.",
             )
-            settings["ticket_panel_channel_id"] = ticket_panel.id
-            (created if len(ctx.guild.text_channels) > before else used_existing).append(f"Ticket Panel Channel: {ticket_panel.mention}")
+            config["ticket_panel_channel_id"] = panel_channel.id
+            created_lines.append(f"🎟️ Ticket Panel: {panel_channel.mention}")
+            await send_or_update_ticket_panel(guild, panel_channel)
+    else:
+        skipped_lines.append("Tickets")
 
-            ticket_embed = discord.Embed(
-                title="🎟️ Open a Ticket",
-                description="Click the button below to open a ticket.\n\nAvailability Times: 9am to 10pm UK",
-                color=discord.Color.green(),
-            )
-            await ticket_panel.send(embed=ticket_embed, view=TicketsButton())
-        elif "ticketpanel" in exclusions:
-            skipped.append("Ticket Panel Channel")
+    # Logs category/channels.
+    log_children = {"wall", "guilt", "leaves", "transcripts", "stafflogs"}
+    if "logs" not in exclusions and not log_children.issubset(exclusions):
+        logs_category = await get_or_create_category(guild, "XSI Logs", config)
+        created_lines.append(f"📁 Logs Category: {logs_category.name}")
 
-        if "welcome" not in exclusions and info_category is not None:
-            before = len(ctx.guild.text_channels)
-            welcome = await get_or_create_text_channel(
-                ctx.guild,
-                "welcome",
-                category=info_category,
-                topic="New member welcomes.",
-            )
-            settings["welcome_channel_id"] = welcome.id
-            settings.setdefault("welcome_message", DEFAULT_WELCOME_MESSAGE)
-            (created if len(ctx.guild.text_channels) > before else used_existing).append(f"Welcome Channel: {welcome.mention}")
+        if "wall" not in exclusions:
+            wall = await get_or_create_text_channel(guild, "wall-of-knobs", logs_category, config)
+            config["wall_channel_id"] = wall.id
+            created_lines.append(f"🧱 Wall: {wall.mention}")
         else:
-            skipped.append("Welcome Channel")
+            skipped_lines.append("Wall")
 
-        if "rules" not in exclusions and info_category is not None:
-            before = len(ctx.guild.text_channels)
-            rules_channel = await get_or_create_text_channel(
-                ctx.guild,
-                "rules",
-                category=info_category,
-                topic="Server rules.",
-            )
-            settings["rules_channel_id"] = rules_channel.id
-            (created if len(ctx.guild.text_channels) > before else used_existing).append(f"Rules Channel: {rules_channel.mention}")
-            await send_default_rules_embed(rules_channel)
+        if "leaves" not in exclusions:
+            leaves = await get_or_create_text_channel(guild, "leaves", logs_category, config)
+            config["leaves_channel_id"] = leaves.id
+            config["guilt_channel_id"] = leaves.id
+            created_lines.append(f"👋 Leaves: {leaves.mention}")
         else:
-            skipped.append("Rules Channel")
+            skipped_lines.append("Leaves")
 
-        if "giveaways" not in exclusions and info_category is not None:
-            before = len(ctx.guild.text_channels)
-            giveaways = await get_or_create_text_channel(
-                ctx.guild,
-                "giveaways",
-                category=info_category,
-                topic="Giveaways are posted here.",
-            )
-            settings["giveaways_channel_id"] = giveaways.id
-            (created if len(ctx.guild.text_channels) > before else used_existing).append(f"Giveaways Channel: {giveaways.mention}")
+        if "transcripts" not in exclusions:
+            transcripts = await get_or_create_text_channel(guild, "ticket-transcripts", logs_category, config)
+            config["transcript_channel_id"] = transcripts.id
+            created_lines.append(f"📜 Transcripts: {transcripts.mention}")
         else:
-            skipped.append("Giveaways Channel")
+            skipped_lines.append("Transcripts")
 
-        if "wall" not in exclusions and logs_category is not None:
-            before = len(ctx.guild.text_channels)
-            wall = await get_or_create_text_channel(
-                ctx.guild,
-                "wall-of-knobs",
-                category=logs_category,
-                topic="Moderation warning logs.",
-            )
-            settings["wall_channel_id"] = wall.id
-            (created if len(ctx.guild.text_channels) > before else used_existing).append(f"Wall Channel: {wall.mention}")
+        if "stafflogs" not in exclusions:
+            staff_logs = await get_or_create_text_channel(guild, "staff-logs", logs_category, config)
+            config["staff_log_channel_id"] = staff_logs.id
+            created_lines.append(f"🛡️ Staff Logs: {staff_logs.mention}")
         else:
-            skipped.append("Wall Channel")
+            skipped_lines.append("Staff Logs")
+    else:
+        skipped_lines.append("Logs")
 
-        if "leaves" not in exclusions and logs_category is not None:
-            before = len(ctx.guild.text_channels)
-            leaves = await get_or_create_text_channel(
-                ctx.guild,
-                "leaves",
-                category=logs_category,
-                topic="Member leave logs / Board of Guilt.",
-            )
-            settings["leaves_channel_id"] = leaves.id
-            settings["guilt_channel_id"] = leaves.id
-            (created if len(ctx.guild.text_channels) > before else used_existing).append(f"Leaves / Board of Guilt Channel: {leaves.mention}")
+    # Info category/channels.
+    info_children = {"welcome", "rules", "giveaways"}
+    if "info" not in exclusions and not info_children.issubset(exclusions):
+        info_category = await get_or_create_category(guild, "XSI Info", config)
+        created_lines.append(f"📁 Info Category: {info_category.name}")
+
+        if "welcome" not in exclusions:
+            welcome = await get_or_create_text_channel(guild, "welcome", info_category, config)
+            config["welcome_channel_id"] = welcome.id
+            created_lines.append(f"👋 Welcome: {welcome.mention}")
         else:
-            skipped.append("Leaves / Board of Guilt Channel")
+            skipped_lines.append("Welcome")
 
-        if "transcripts" not in exclusions and logs_category is not None:
-            before = len(ctx.guild.text_channels)
-            transcripts = await get_or_create_text_channel(
-                ctx.guild,
-                "ticket-transcripts",
-                category=logs_category,
-                topic="Ticket transcripts can be posted here later.",
-            )
-            settings["transcript_channel_id"] = transcripts.id
-            (created if len(ctx.guild.text_channels) > before else used_existing).append(f"Transcript Channel: {transcripts.mention}")
+        if "rules" not in exclusions:
+            rules = await get_or_create_text_channel(guild, "rules", info_category, config)
+            config["rules_channel_id"] = rules.id
+            created_lines.append(f"📜 Rules: {rules.mention}")
         else:
-            skipped.append("Transcript Channel")
+            skipped_lines.append("Rules")
 
-        if "stafflogs" not in exclusions and logs_category is not None:
-            before = len(ctx.guild.text_channels)
-            staff_logs = await get_or_create_text_channel(
-                ctx.guild,
-                "staff-logs",
-                category=logs_category,
-                topic="Staff action logs can be posted here later.",
-            )
-            settings["staff_logs_channel_id"] = staff_logs.id
-            (created if len(ctx.guild.text_channels) > before else used_existing).append(f"Staff Logs Channel: {staff_logs.mention}")
+        if "giveaways" not in exclusions:
+            giveaways = await get_or_create_text_channel(guild, "giveaways", info_category, config)
+            config["giveaways_channel_id"] = giveaways.id
+            created_lines.append(f"🎉 Giveaways: {giveaways.mention}")
         else:
-            skipped.append("Staff Logs Channel")
+            skipped_lines.append("Giveaways")
+    else:
+        skipped_lines.append("Info")
 
-        save_server_settings()
-
-    except discord.Forbidden:
-        await ctx.send("❌ I need **Manage Channels** permission to run setup.")
-        return
-    except discord.HTTPException as exc:
-        log.exception("Setup failed: %s", exc)
-        await ctx.send("❌ Discord rejected part of the setup. Check my permissions and try again.")
-        return
+    config.setdefault("availability", default_guild_config()["availability"])
+    await save_server_settings()
 
     embed = discord.Embed(
-        title="✅ XSI Setup Complete",
-        description="Server setup has been saved for this server.",
+        title="✅ XSI setup complete",
+        description="Server setup was created and saved for this server.",
         color=discord.Color.green(),
     )
-
-    if created:
-        embed.add_field(name="Created", value="\n".join(created)[:1024], inline=False)
-
-    if used_existing:
-        embed.add_field(name="Already Existing / Reused", value="\n".join(used_existing)[:1024], inline=False)
-
-    if skipped:
-        embed.add_field(name="Skipped", value="\n".join(skipped)[:1024], inline=False)
-
-    if unknown:
-        embed.add_field(name="Unknown Skip Words Ignored", value=", ".join(unknown)[:1024], inline=False)
-
+    embed.add_field(name="Created / Saved", value="\n".join(created_lines)[:1024] or "Nothing new created.", inline=False)
+    embed.add_field(name="Skipped", value="\n".join(sorted(set(skipped_lines)))[:1024] or "Nothing skipped.", inline=False)
     embed.add_field(
         name="Examples",
         value=(
@@ -1741,490 +1360,920 @@ async def setup(ctx: commands.Context, *, exclude: Optional[str] = None) -> None
         ),
         inline=False,
     )
-
-    await ctx.send(embed=embed)
-
-
-# ---------------- SETUP HYBRID COMMANDS ----------------
-@bot.hybrid_command(name="setticketcategory", aliases=["setcategory"], description="Set the category where tickets are created")
-@commands.has_permissions(administrator=True)
-@app_commands.describe(category="Ticket category. Leave empty to use this channel's current category.")
-async def setticketcategory(ctx: commands.Context, category: Optional[discord.CategoryChannel] = None) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
-        return
-
-    target = category
-
-    if target is None:
-        if isinstance(ctx.channel, discord.TextChannel) and ctx.channel.category is not None:
-            target = ctx.channel.category
-        else:
-            await ctx.send("❌ This channel is not inside a category. Use `!setticketcategory CATEGORY_ID` or `/setticketcategory`.")
-            return
-
-    settings = get_guild_settings(ctx.guild.id)
-    settings["ticket_category_id"] = target.id
-    save_server_settings()
-
-    await ctx.send(f"✅ Ticket category set to **{target.name}**.")
-
-
-@bot.hybrid_command(name="setgulitcategory", aliases=["setgulitchannel"], description="Set the Board of Guilt leave-log channel")
-@commands.has_permissions(administrator=True)
-@app_commands.describe(channel="Board of Guilt text channel. Leave empty to use this channel.")
-async def setgulitcategory(ctx: commands.Context, channel: Optional[discord.TextChannel] = None) -> None:
-    await set_guilt_channel_from_command(ctx, channel)
-
-
-@bot.hybrid_command(name="setguiltchannel", aliases=["setguiltcategory"], description="Set the Board of Guilt leave-log channel")
-@commands.has_permissions(administrator=True)
-@app_commands.describe(channel="Board of Guilt text channel. Leave empty to use this channel.")
-async def setguiltchannel(ctx: commands.Context, channel: Optional[discord.TextChannel] = None) -> None:
-    await set_guilt_channel_from_command(ctx, channel)
-
-
-@bot.hybrid_command(name="setleaveschannel", description="Set the leaves / Board of Guilt channel")
-@commands.has_permissions(administrator=True)
-@app_commands.describe(channel="Leaves text channel. Leave empty to use this channel.")
-async def setleaveschannel(ctx: commands.Context, channel: Optional[discord.TextChannel] = None) -> None:
-    await set_guilt_channel_from_command(ctx, channel)
-
-
-@bot.hybrid_command(name="setwallchannel", description="Set the Wall of Knobs moderation-log channel")
-@commands.has_permissions(administrator=True)
-@app_commands.describe(channel="Wall of Knobs text channel. Leave empty to use this channel.")
-async def setwallchannel(ctx: commands.Context, channel: Optional[discord.TextChannel] = None) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
-        return
-
-    target = channel
-    if target is None:
-        if isinstance(ctx.channel, discord.TextChannel):
-            target = ctx.channel
-        else:
-            await ctx.send("❌ Please choose a text channel.")
-            return
-
-    settings = get_guild_settings(ctx.guild.id)
-    settings["wall_channel_id"] = target.id
-    save_server_settings()
-
-    await ctx.send(f"✅ Wall of Knobs channel set to {target.mention}.")
-
-
-async def set_simple_channel_from_command(
-    ctx: commands.Context,
-    channel: Optional[discord.TextChannel],
-    setting_key: str,
-    label: str,
-) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
-        return
-
-    target = channel
-    if target is None:
-        if isinstance(ctx.channel, discord.TextChannel):
-            target = ctx.channel
-        else:
-            await ctx.send("❌ Please choose a text channel.")
-            return
-
-    settings = get_guild_settings(ctx.guild.id)
-    settings[setting_key] = target.id
-    save_server_settings()
-
-    await ctx.send(f"✅ {label} set to {target.mention}.")
-
-
-@bot.hybrid_command(name="setruleschannel", description="Set the rules channel")
-@commands.has_permissions(administrator=True)
-@app_commands.describe(channel="Rules text channel. Leave empty to use this channel.")
-async def setruleschannel(ctx: commands.Context, channel: Optional[discord.TextChannel] = None) -> None:
-    await set_simple_channel_from_command(ctx, channel, "rules_channel_id", "Rules channel")
-
-
-@bot.hybrid_command(name="setgiveawayschannel", description="Set the giveaways channel")
-@commands.has_permissions(administrator=True)
-@app_commands.describe(channel="Giveaways text channel. Leave empty to use this channel.")
-async def setgiveawayschannel(ctx: commands.Context, channel: Optional[discord.TextChannel] = None) -> None:
-    await set_simple_channel_from_command(ctx, channel, "giveaways_channel_id", "Giveaways channel")
-
-
-@bot.hybrid_command(name="settranscriptchannel", description="Set the ticket transcript channel")
-@commands.has_permissions(administrator=True)
-@app_commands.describe(channel="Transcript text channel. Leave empty to use this channel.")
-async def settranscriptchannel(ctx: commands.Context, channel: Optional[discord.TextChannel] = None) -> None:
-    await set_simple_channel_from_command(ctx, channel, "transcript_channel_id", "Ticket transcript channel")
-
-
-@bot.hybrid_command(name="setstafflogchannel", description="Set the staff logs channel")
-@commands.has_permissions(administrator=True)
-@app_commands.describe(channel="Staff logs text channel. Leave empty to use this channel.")
-async def setstafflogchannel(ctx: commands.Context, channel: Optional[discord.TextChannel] = None) -> None:
-    await set_simple_channel_from_command(ctx, channel, "staff_logs_channel_id", "Staff logs channel")
-
-
-@bot.hybrid_command(name="setticketpanelchannel", description="Set the channel where the ticket panel should be posted")
-@commands.has_permissions(administrator=True)
-@app_commands.describe(channel="Ticket panel text channel. Leave empty to use this channel.")
-async def setticketpanelchannel(ctx: commands.Context, channel: Optional[discord.TextChannel] = None) -> None:
-    await set_simple_channel_from_command(ctx, channel, "ticket_panel_channel_id", "Ticket panel channel")
-
-
-@bot.hybrid_command(name="setwelcome", description="Set the welcome channel and welcome message")
-@commands.has_permissions(administrator=True)
-@app_commands.describe(
-    channel="Welcome text channel. Leave empty to use this channel.",
-    message="Welcome message. Use {user}, @user, {server}, {username}, or {display_name}.",
-)
-async def setwelcome(
-    ctx: commands.Context,
-    channel: Optional[discord.TextChannel] = None,
-    *,
-    message: Optional[str] = None,
-) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
-        return
-
-    target = channel
-    if target is None:
-        if isinstance(ctx.channel, discord.TextChannel):
-            target = ctx.channel
-        else:
-            await ctx.send("❌ Please choose a text channel.")
-            return
-
-    welcome_message = message.strip() if isinstance(message, str) and message.strip() else DEFAULT_WELCOME_MESSAGE
-
-    settings = get_guild_settings(ctx.guild.id)
-    settings["welcome_channel_id"] = target.id
-    settings["welcome_message"] = welcome_message
-    save_server_settings()
-
-    preview = format_welcome_message(welcome_message, ctx.author) if isinstance(ctx.author, discord.Member) else welcome_message
-
-    await ctx.send(
-        f"✅ Welcome channel set to {target.mention}.\n"
-        f"Preview: {preview}",
-        allowed_mentions=discord.AllowedMentions(users=False, roles=False, everyone=False),
-    )
-
-
-@bot.hybrid_command(name="testwelcome", description="Test the welcome message")
-@commands.has_permissions(administrator=True)
-async def testwelcome(ctx: commands.Context) -> None:
-    if ctx.guild is None or not isinstance(ctx.author, discord.Member):
-        await ctx.send("❌ This command only works inside a server.")
-        return
-
-    message = format_welcome_message(get_welcome_message(ctx.guild), ctx.author)
-    await ctx.send(
-        message,
-        allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-    )
-
-
-@bot.hybrid_command(name="setstaffrole", description="Set the staff role that can see and close tickets")
-@commands.has_permissions(administrator=True)
-@app_commands.describe(role="Staff role")
-async def setstaffrole(ctx: commands.Context, role: discord.Role) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
-        return
-
-    settings = get_guild_settings(ctx.guild.id)
-    settings["staff_role_ids"] = [role.id]
-    save_server_settings()
-
-    await ctx.send(f"✅ Staff role set to {role.mention}.")
-
-
-@bot.hybrid_command(name="addstaffrole", description="Add another staff role for tickets/mod bypass")
-@commands.has_permissions(administrator=True)
-@app_commands.describe(role="Staff role to add")
-async def addstaffrole(ctx: commands.Context, role: discord.Role) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
-        return
-
-    settings = get_guild_settings(ctx.guild.id)
-    role_ids = get_staff_role_ids(ctx.guild.id)
-
-    if role.id not in role_ids:
-        role_ids.append(role.id)
-
-    settings["staff_role_ids"] = role_ids
-    save_server_settings()
-
-    await ctx.send(f"✅ Added staff role {role.mention}.")
-
-
-@bot.hybrid_command(name="removestaffrole", description="Remove a staff role from bot settings")
-@commands.has_permissions(administrator=True)
-@app_commands.describe(role="Staff role to remove")
-async def removestaffrole(ctx: commands.Context, role: discord.Role) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
-        return
-
-    settings = get_guild_settings(ctx.guild.id)
-    role_ids = [role_id for role_id in get_staff_role_ids(ctx.guild.id) if role_id != role.id]
-    settings["staff_role_ids"] = role_ids
-    save_server_settings()
-
-    await ctx.send(f"✅ Removed staff role {role.mention}.")
-
-
-@bot.hybrid_command(name="setticketownername", description="Set the name used in ticket offline auto-replies")
-@commands.has_permissions(administrator=True)
-@app_commands.describe(name="Name to show in ticket offline messages")
-async def setticketownername(ctx: commands.Context, *, name: str) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
-        return
-
-    clean_name = name.strip()
-    if not clean_name:
-        await ctx.send("❌ Please give me a name.")
-        return
-
-    settings = get_guild_settings(ctx.guild.id)
-    settings["ticket_owner_name"] = clean_name
-    save_server_settings()
-
-    await ctx.send(f"✅ Ticket owner display name set to **{discord.utils.escape_markdown(clean_name)}**.")
-
-
-@bot.hybrid_command(name="requiredpermissions", aliases=["permissions", "perms"], description="Show the permissions XSI needs")
-@commands.has_permissions(administrator=True)
-async def requiredpermissions(ctx: commands.Context) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
-        return
-
-    bot_member = ctx.guild.me or (ctx.guild.get_member(bot.user.id) if bot.user is not None else None)
-
-    if bot_member is None:
-        await ctx.send("❌ I could not check my permissions in this server.")
-        return
-
-    permissions = bot_member.guild_permissions
-    missing = missing_permission_names(permissions)
+    return embed
+
+
+async def delete_channel_safely(channel: discord.abc.GuildChannel, reason: str) -> bool:
+    try:
+        await channel.delete(reason=reason)
+        return True
+    except discord.HTTPException:
+        return False
+
+
+async def clear_setup_impl(guild: discord.Guild, mode: str, confirm: str) -> tuple[discord.Embed, bool]:
+    mode = mode.lower().strip().replace(" ", "_")
+    confirm_clean = confirm.strip().upper()
+    destructive = mode in {"delete", "delete_created", "wipe", "factory", "factory_wipe", "full", "full_wipe"}
+
+    if mode in {"", "safe", "keep", "reset"}:
+        async with settings_lock:
+            server_settings.pop(str(guild.id), None)
+            await save_server_settings()
+        embed = discord.Embed(
+            title="✅ Setup cleared",
+            description="XSI settings were cleared, but channels were kept.",
+            color=discord.Color.green(),
+        )
+        return embed, True
+
+    if destructive and confirm_clean not in {"YES", "CONFIRM", "CONFIRM WIPE", "DELETE"}:
+        embed = discord.Embed(
+            title="⚠️ Confirmation needed",
+            description=(
+                "This will delete channels/categories that XSI created.\n\n"
+                "Run one of these:\n"
+                "`/clearsetup mode: delete_created confirm: YES`\n"
+                "`/clearsetup mode: factory_wipe confirm: YES`\n\n"
+                "Prefix:\n"
+                "`!clearsetup delete_created YES`\n"
+                "`!clearsetup factory_wipe YES`"
+            ),
+            color=discord.Color.orange(),
+        )
+        return embed, False
+
+    config = guild_config(guild.id)
+    deleted: list[str] = []
+    failed: list[str] = []
+
+    if mode in {"delete", "delete_created"}:
+        channel_ids = [int(x) for x in config.get("created_channel_ids", []) if str(x).isdigit()]
+        category_ids = [int(x) for x in config.get("created_category_ids", []) if str(x).isdigit()]
+
+        # Delete known created channels first.
+        for channel_id in channel_ids:
+            channel = guild.get_channel(channel_id)
+            if channel is None:
+                continue
+            ok = await delete_channel_safely(channel, "XSI clearsetup delete_created")
+            (deleted if ok else failed).append(f"#{channel.name}")
+
+        # Delete child channels under created categories, then categories.
+        for category_id in category_ids:
+            category = guild.get_channel(category_id)
+            if isinstance(category, discord.CategoryChannel):
+                for child in list(category.channels):
+                    ok = await delete_channel_safely(child, "XSI clearsetup delete_created child")
+                    (deleted if ok else failed).append(f"#{child.name}")
+                ok = await delete_channel_safely(category, "XSI clearsetup delete_created category")
+                (deleted if ok else failed).append(f"📁 {category.name}")
+
+    elif mode in {"wipe", "factory", "factory_wipe", "full", "full_wipe"}:
+        # Delete exactly named XSI categories and their children.
+        for name in ["XSI Tickets", "XSI Logs", "XSI Info"]:
+            category = discord.utils.get(guild.categories, name=name)
+            if category is None:
+                continue
+            for child in list(category.channels):
+                ok = await delete_channel_safely(child, "XSI factory wipe child")
+                (deleted if ok else failed).append(f"#{child.name}")
+            ok = await delete_channel_safely(category, "XSI factory wipe category")
+            (deleted if ok else failed).append(f"📁 {category.name}")
+
+    async with settings_lock:
+        server_settings.pop(str(guild.id), None)
+        await save_server_settings()
 
     embed = discord.Embed(
-        title="🔐 XSI Required Permissions",
-        description=(
-            "Use this to check whether XSI can run setup, tickets, welcomes, logs, giveaways, "
-            "and moderation correctly."
-        ),
-        color=discord.Color.green() if not missing else discord.Color.orange(),
+        title="🧹 XSI setup cleared",
+        description="Settings were cleared and requested setup channels/categories were processed.",
+        color=discord.Color.green() if not failed else discord.Color.orange(),
     )
+    embed.add_field(name="Deleted", value="\n".join(deleted)[:1024] or "Nothing deleted.", inline=False)
+    if failed:
+        embed.add_field(name="Failed", value="\n".join(failed)[:1024], inline=False)
+    embed.add_field(name="Mode", value=mode, inline=True)
+    return embed, True
 
-    required_lines = permission_lines(permissions, REQUIRED_PERMISSION_ITEMS)
-    optional_lines = permission_lines(permissions, OPTIONAL_PERMISSION_ITEMS)
 
-    embed.add_field(
-        name="Required Bot Permissions",
-        value="\n".join(required_lines),
-        inline=False,
-    )
+# ============================================================
+# SMART MESSAGES
+# ============================================================
+def get_guild_smart_messages(guild_id: int) -> dict[str, Any]:
+    gid = str(guild_id)
+    data = smart_messages.get(gid)
+    if not isinstance(data, dict):
+        data = {}
+        smart_messages[gid] = data
+    return data
 
-    embed.add_field(
-        name="Optional / Future Permissions",
-        value="\n".join(optional_lines),
-        inline=False,
-    )
 
-    role_note = (
-        f"My top role: {bot_member.top_role.mention}\n"
-        "Move XSI's role above members it needs to kick/ban. "
-        "Discord will block moderation if my role is lower than the target member's role."
-    )
-    embed.add_field(name="Role Position", value=role_note, inline=False)
+async def maybe_handle_smart_message(message: discord.Message) -> bool:
+    if message.guild is None or message.author.bot:
+        return False
+    if message.content.startswith(("!", "?", "/")):
+        return False
 
-    intent_note = (
-        "Also enable these in the Discord Developer Portal:\n"
-        "✅ Message Content Intent — for `!` commands and automod scanning\n"
-        "✅ Server Members Intent — for welcome/leave messages"
-    )
-    embed.add_field(name="Developer Portal Intents", value=intent_note, inline=False)
+    rules = get_guild_smart_messages(message.guild.id)
+    if not rules:
+        return False
 
-    app_command_note = (
-        "The invite link must include both scopes: `bot` and `applications.commands`.\n"
-        "Server/channel permissions should allow staff to use application commands."
-    )
-    embed.add_field(name="Slash Commands", value=app_command_note, inline=False)
+    content = normalize_text(message.content)
+    now = time.time()
 
-    if missing:
-        embed.add_field(
-            name="Missing Right Now",
-            value="❌ " + "\n❌ ".join(missing),
-            inline=False,
+    for trigger, data in rules.items():
+        if not isinstance(data, dict):
+            continue
+        trigger_normal = normalize_text(trigger)
+        if not trigger_normal or trigger_normal not in content:
+            continue
+
+        cooldown_key = f"{message.guild.id}:{message.channel.id}:{trigger_normal}"
+        last = smart_cooldowns.get(cooldown_key, 0)
+        if now - last < int(data.get("cooldown", SMART_MESSAGE_COOLDOWN)):
+            return False
+
+        response = str(data.get("response") or "")
+        if not response:
+            return False
+
+        response = format_mentions_safe(response, message.author, message.guild)
+        smart_cooldowns[cooldown_key] = now
+        await message.channel.send(
+            response,
+            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
         )
-    else:
-        embed.add_field(
-            name="Status",
-            value="✅ XSI has the main permissions it needs.",
-            inline=False,
-        )
+        return True
 
-    if bot.user is not None:
-        invite_url = discord.utils.oauth_url(
-            bot.user.id,
-            permissions=build_recommended_permissions(),
-            scopes=("bot", "applications.commands"),
-        )
-        embed.add_field(
-            name="Recommended Invite Link",
-            value=f"[Re-invite XSI with recommended permissions]({invite_url})",
-            inline=False,
-        )
+    return False
 
+
+# ============================================================
+# GIVEAWAYS
+# ============================================================
+def make_prize(amount: int, prize_type: str) -> str | None:
+    prize_type = prize_type.lower().strip()
+    if prize_type == "normal":
+        prize = f"🚘 {amount} Normal Car"
+        if amount != 1:
+            prize += "s"
+        return prize
+    if prize_type == "hard trade":
+        prize = f"✨ {amount} Hard Trade"
+        if amount != 1:
+            prize += "s"
+        return prize
+    if prize_type == "very hard trade":
+        prize = f"💎 {amount} Very Hard Trade"
+        if amount != 1:
+            prize += "s"
+        return prize
+    return None
+
+
+async def finish_giveaway_by_data(data: dict[str, Any]) -> None:
+    guild = bot.get_guild(int(data["guild_id"]))
+    if guild is None:
+        return
+    channel = await get_text_channel(guild, int(data["channel_id"]))
+    if channel is None:
+        return
+
+    prize = str(data["prize"])
+    try:
+        message = await channel.fetch_message(int(data["message_id"]))
+    except discord.HTTPException:
+        await channel.send(f"❌ Giveaway message for {prize} was deleted or could not be found.")
+        return
+
+    entries: list[discord.User | discord.Member] = []
+    for reaction in message.reactions:
+        if str(reaction.emoji) == "🎉":
+            async for user in reaction.users():
+                if not user.bot:
+                    entries.append(user)
+
+    if not entries:
+        await channel.send(f"❌ No one entered the {prize} giveaway.")
+        return
+
+    winner = random.choice(entries)
+    end_embed = discord.Embed(
+        title="🎉 GIVEAWAY ENDED 🎉",
+        description=f"Prize: {prize}\n\nWinner: {winner.mention}",
+        color=discord.Color.green(),
+    )
+    await channel.send(embed=end_embed)
+    await channel.send(f"🎉 Congratulations {winner.mention}! You won {prize}!")
+
+
+async def start_giveaway_in_channel(channel: discord.TextChannel, amount: int, prize_type: str, seconds: int, test: bool = False) -> str:
+    if amount <= 0:
+        return "❌ Amount must be at least 1."
+    prize = make_prize(amount, prize_type)
+    if prize is None:
+        return "❌ Use Normal, Hard Trade, or Very Hard Trade."
+
+    title = "🎉 TEST GIVEAWAY 🎉" if test else "🎉 GIVEAWAY 🎉"
+    time_text = "30 seconds" if test else "24 hours"
+    embed = discord.Embed(
+        title=title,
+        description=f"Prize: {prize}\n\nReact with 🎉 to enter!\n\n⏰ Ends in {time_text}",
+        color=discord.Color.gold(),
+    )
+    message = await channel.send(embed=embed)
+    await message.add_reaction("🎉")
+
+    giveaway_id = str(message.id)
+    active_giveaways[giveaway_id] = {
+        "guild_id": channel.guild.id,
+        "channel_id": channel.id,
+        "message_id": message.id,
+        "prize": prize,
+        "ends_at": int(time.time() + seconds),
+    }
+    await save_giveaways()
+    return f"✅ Started giveaway for {prize}."
+
+
+# ============================================================
+# BACKGROUND TASKS
+# ============================================================
+@tasks.loop(seconds=60)
+async def availability_refresher() -> None:
+    await bot.wait_until_ready()
+    changed_any = False
+
+    for guild in list(bot.guilds):
+        config = guild_config(guild.id)
+        old_status = config.get("last_availability_status")
+        cleaned = await cleanup_expired_unavailable(guild.id)
+        state = get_availability_state(guild.id)
+        new_status = state.get("status")
+
+        if cleaned:
+            changed_any = True
+
+        if old_status != new_status:
+            config["last_availability_status"] = new_status
+            changed_any = True
+            try:
+                await send_or_update_ticket_panel(guild)
+            except discord.HTTPException:
+                pass
+
+    if changed_any:
+        await save_server_settings()
+
+
+@tasks.loop(seconds=30)
+async def giveaway_checker() -> None:
+    await bot.wait_until_ready()
+    now = int(time.time())
+    finished: list[str] = []
+
+    for giveaway_id, data in list(active_giveaways.items()):
+        if not isinstance(data, dict):
+            finished.append(giveaway_id)
+            continue
+        if now >= int(data.get("ends_at", 0)):
+            await finish_giveaway_by_data(data)
+            finished.append(giveaway_id)
+
+    if finished:
+        async with giveaway_lock:
+            for giveaway_id in finished:
+                active_giveaways.pop(giveaway_id, None)
+            await save_giveaways()
+
+
+# ============================================================
+# EVENTS
+# ============================================================
+@bot.event
+async def on_ready() -> None:
+    log.info("----------------------------")
+    log.info("✅ XSI logged in as %s", bot.user)
+    log.info("✅ %s", VERSION)
+    log.info("----------------------------")
+
+
+@bot.event
+async def on_member_join(member: discord.Member) -> None:
+    config = guild_config(member.guild.id)
+    channel = await get_text_channel(member.guild, config.get("welcome_channel_id"))
+    if channel is None:
+        return
+
+    welcome_text = str(config.get("welcome_message") or DEFAULT_WELCOME_MESSAGE)
+    message = format_mentions_safe(welcome_text, member, member.guild)
+    try:
+        await channel.send(message, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+    except discord.HTTPException:
+        pass
+
+
+@bot.event
+async def on_member_remove(member: discord.Member) -> None:
+    config = guild_config(member.guild.id)
+    channel = await get_text_channel(member.guild, config.get("leaves_channel_id") or config.get("guilt_channel_id"))
+    if channel is None:
+        return
+
+    embed = discord.Embed(
+        title="⚖️ Board of Guilt",
+        description=f"💀 {member.name} left the server...\n\nTheir name shall stay here forever.",
+        color=discord.Color.red(),
+    )
+    embed.add_field(name="Username", value=member.name, inline=True)
+    embed.add_field(name="Display Name", value=member.display_name, inline=True)
+    embed.add_field(name="User ID", value=str(member.id), inline=False)
+    embed.set_thumbnail(url=member.display_avatar.url)
+
+    try:
+        await channel.send(content=f"bye I guess... <@{member.id}>", embed=embed)
+    except discord.HTTPException:
+        pass
+
+
+@bot.event
+async def on_message(message: discord.Message) -> None:
+    if message.author.bot:
+        return
+    if message.guild is None or not isinstance(message.author, discord.Member):
+        return
+
+    await maybe_dm_ticket_owner(message)
+    await maybe_send_unavailable_ticket_reply(message)
+    await maybe_handle_smart_message(message)
+
+    member = message.author
+
+    if is_staff_or_mod(member):
+        await bot.process_commands(message)
+        return
+
+    content = message.content or ""
+    offence = detect_offence(content)
+    if offence is None and is_spam(message.guild.id, message.channel.id, member.id, content):
+        offence = "Spam / repeated messages"
+
+    if offence is not None:
+        warning_count = await add_warning(message.guild.id, member.id)
+        try:
+            await message.delete()
+        except discord.Forbidden:
+            await message.channel.send("❌ I need Manage Messages permission.")
+        except discord.HTTPException:
+            pass
+
+        if warning_count >= MAX_WARNINGS:
+            punishment = "Banned" if PUNISHMENT_ON_MAX_WARNINGS.lower() == "ban" else "Kicked"
+            await send_wall_log(member, offence, punishment, content, warning_count)
+            try:
+                await punish_if_needed(message.guild, message.channel, member, offence, warning_count)
+            except discord.Forbidden:
+                await message.channel.send(f"❌ I do not have permission to punish {member.mention}.")
+            except discord.HTTPException as exc:
+                log.exception("Punishment failed: %s", exc)
+                await message.channel.send("❌ Something went wrong while punishing.")
+            return
+
+        await send_wall_log(member, offence, "Warning", content, warning_count)
+        await message.channel.send(
+            f"⚠️ {member.mention}, warning {warning_count}/{MAX_WARNINGS} — {offence}.\nYour message was deleted."
+        )
+        return
+
+    await bot.process_commands(message)
+
+
+# ============================================================
+# PREFIX COMMANDS - SETUP / STATUS
+# ============================================================
+@bot.command(name="version")
+async def version_cmd(ctx: commands.Context) -> None:
+    await ctx.send(f"✅ {VERSION}\nBuild tag: `{BUILD_TAG}`")
+
+
+@bot.command(name="buildcheck", aliases=["commandcount", "slashcount"])
+async def buildcheck_cmd(ctx: commands.Context) -> None:
+    names = sorted(command.name for command in bot.tree.get_commands())
+    critical = ["clearsetup", "setunavailable", "refreshticketpanel", "setavailability", "availability", "clearunavailable"]
+    missing = [name for name in critical if name not in names]
+    missing_text = ", ".join(missing) if missing else "None"
+    await ctx.send(
+        f"✅ {VERSION}\n"
+        f"Build tag: `{BUILD_TAG}`\n"
+        f"Slash commands loaded in memory: `{len(names)}`\n"
+        f"Critical commands missing: `{missing_text}`"
+    )
+
+
+@bot.command(name="synccommands", aliases=["sync"])
+@commands.has_permissions(administrator=True)
+async def synccommands(ctx: commands.Context) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ Run this inside a server.")
+        return
+    bot.tree.clear_commands(guild=ctx.guild)
+    bot.tree.copy_global_to(guild=ctx.guild)
+    synced = await bot.tree.sync(guild=ctx.guild)
+    await ctx.send(f"✅ Synced {len(synced)} slash command(s) in **{ctx.guild.name}**.")
+
+
+@bot.command(name="setup")
+@commands.has_permissions(administrator=True)
+async def setup_prefix(ctx: commands.Context, *, options: str = "") -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    embed = await run_setup(ctx.guild, ctx.channel, parse_setup_exclusions(options))
     await ctx.send(embed=embed)
 
 
-@bot.hybrid_command(name="checksetup", description="Show this server's bot setup")
+@bot.command(name="clearsetup")
+@commands.has_permissions(administrator=True)
+async def clearsetup_prefix(ctx: commands.Context, mode: str = "keep", confirm: str = "") -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    embed, _ = await clear_setup_impl(ctx.guild, mode, confirm)
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="checksetup")
 @commands.has_permissions(administrator=True)
 async def checksetup(ctx: commands.Context) -> None:
     if ctx.guild is None:
         await ctx.send("❌ This command only works inside a server.")
         return
+    config = guild_config(ctx.guild.id)
 
-    settings = get_guild_settings(ctx.guild.id)
-    category_id = parse_int(settings.get("ticket_category_id"))
+    def ch_line(label: str, key: str) -> str:
+        channel_id = config.get(key)
+        channel = ctx.guild.get_channel(int(channel_id)) if channel_id else None
+        return f"{label}: {channel.mention if isinstance(channel, discord.TextChannel) else 'Not set'}"
+
     category = get_ticket_category(ctx.guild)
-    if category is not None:
-        category_text = f"{category.name} (`{category.id}`)"
-    else:
-        category_text = mention_category(ctx.guild, category_id)
+    roles = staff_role_objects(ctx.guild)
+    state = get_availability_state(ctx.guild.id)
 
-    staff_roles = []
-    for role_id in get_staff_role_ids(ctx.guild.id):
-        role = ctx.guild.get_role(role_id)
-        staff_roles.append(role.mention if role is not None else f"Missing role `{role_id}`")
-
-    embed = discord.Embed(
-        title="⚙️ Bot Setup",
-        color=discord.Color.blue(),
+    embed = discord.Embed(title="🔧 XSI Setup Check", color=discord.Color.blue())
+    embed.add_field(name="Ticket Category", value=category.name if category else "Not set", inline=False)
+    embed.add_field(
+        name="Channels",
+        value="\n".join(
+            [
+                ch_line("Ticket Panel", "ticket_panel_channel_id"),
+                ch_line("Welcome", "welcome_channel_id"),
+                ch_line("Wall", "wall_channel_id"),
+                ch_line("Leaves", "leaves_channel_id"),
+                ch_line("Transcripts", "transcript_channel_id"),
+                ch_line("Staff Logs", "staff_log_channel_id"),
+                ch_line("Rules", "rules_channel_id"),
+                ch_line("Giveaways", "giveaways_channel_id"),
+            ]
+        )[:1024],
+        inline=False,
     )
-    smart_count = len(get_smart_messages(ctx.guild.id))
-
-    embed.add_field(name="Ticket Category", value=category_text, inline=False)
-    embed.add_field(name="Ticket Panel Channel", value=mention_channel(ctx.guild, get_ticket_panel_channel_id(ctx.guild)), inline=False)
-    embed.add_field(name="Welcome Channel", value=mention_channel(ctx.guild, get_welcome_channel_id(ctx.guild)), inline=False)
-    embed.add_field(name="Welcome Message", value=get_welcome_message(ctx.guild), inline=False)
-    embed.add_field(name="Rules Channel", value=mention_channel(ctx.guild, get_rules_channel_id(ctx.guild)), inline=False)
-    embed.add_field(name="Giveaways Channel", value=mention_channel(ctx.guild, get_giveaways_channel_id(ctx.guild)), inline=False)
-    embed.add_field(name="Leaves / Board of Guilt Channel", value=mention_channel(ctx.guild, get_guilt_channel_id(ctx.guild)), inline=False)
-    embed.add_field(name="Wall of Knobs Channel", value=mention_channel(ctx.guild, get_wall_channel_id(ctx.guild)), inline=False)
-    embed.add_field(name="Transcript Channel", value=mention_channel(ctx.guild, get_transcript_channel_id(ctx.guild)), inline=False)
-    embed.add_field(name="Staff Logs Channel", value=mention_channel(ctx.guild, get_staff_logs_channel_id(ctx.guild)), inline=False)
-    embed.add_field(name="Ticket Owner Name", value=get_ticket_owner_name_for_guild(ctx.guild), inline=False)
-    embed.add_field(name="Staff Roles", value="\n".join(staff_roles) if staff_roles else "Not set", inline=False)
-    embed.add_field(name="Smart Messages", value=str(smart_count), inline=False)
-
+    embed.add_field(name="Staff Roles", value=", ".join(role.mention for role in roles) or "None", inline=False)
+    embed.add_field(name="Availability", value=f"{state['title']} — {state['panel_line']}", inline=False)
     await ctx.send(embed=embed)
 
 
-@bot.hybrid_command(name="synccommands", description="Force slash commands to refresh in this server")
-@commands.has_permissions(administrator=True)
-async def synccommands(ctx: commands.Context) -> None:
+@bot.command(name="requiredpermissions", aliases=["permissions", "perms"])
+async def requiredpermissions_prefix(ctx: commands.Context) -> None:
     if ctx.guild is None:
         await ctx.send("❌ This command only works inside a server.")
         return
-
-    count = await sync_commands_for_guild(ctx.guild)
-    await ctx.send(f"✅ Synced {count} slash command(s) in **{ctx.guild.name}**.")
+    await ctx.send(embed=build_required_permissions_embed(ctx.guild))
 
 
-# ---------------- TICKET COMMANDS ----------------
-@bot.hybrid_command(name="tickets", aliases=["ticket"], description="Send the ticket panel with auto messages")
+# ============================================================
+# PREFIX COMMANDS - CONFIG SETTERS
+# ============================================================
+@bot.command(name="setticketcategory", aliases=["setcategory"])
 @commands.has_permissions(administrator=True)
-async def tickets(ctx: commands.Context) -> None:
-    embed = discord.Embed(
-        title="🎟️ Open a Ticket to Trade",
-        description=(
-            "Click the button below to open a ticket.\n\n"
-            "Availability Times: 9am to 10pm UK"
-        ),
-        color=discord.Color.green(),
-    )
-
-    await ctx.send(embed=embed, view=TicketsButton())
-
-
-@bot.hybrid_command(name="tickets2", description="Send the basic ticket panel")
-@commands.has_permissions(administrator=True)
-async def tickets2(ctx: commands.Context) -> None:
-    embed = discord.Embed(
-        title="🎫 Open a Ticket",
-        description="Click the button below to create a ticket.",
-        color=discord.Color.green(),
-    )
-
-    await ctx.send(embed=embed, view=Tickets2Button())
+async def setticketcategory(ctx: commands.Context, category_id: int | None = None) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    if category_id is None:
+        if not isinstance(ctx.channel, discord.TextChannel) or ctx.channel.category is None:
+            await ctx.send("❌ This channel is not inside a category. Use `!setticketcategory CATEGORY_ID`.")
+            return
+        category = ctx.channel.category
+    else:
+        category = ctx.guild.get_channel(category_id)
+    if not isinstance(category, discord.CategoryChannel):
+        await ctx.send("❌ That ID is not a valid category in this server.")
+        return
+    config = guild_config(ctx.guild.id)
+    config["ticket_category_id"] = category.id
+    await save_server_settings()
+    await ctx.send(f"✅ Ticket category set to **{category.name}**.")
 
 
-@bot.hybrid_command(name="checkcategory", description="Show the current ticket category")
+@bot.command(name="checkcategory")
 @commands.has_permissions(administrator=True)
 async def checkcategory(ctx: commands.Context) -> None:
     if ctx.guild is None:
         await ctx.send("❌ This command only works inside a server.")
         return
-
     category = get_ticket_category(ctx.guild)
-
-    if category is None:
-        await ctx.send("❌ No ticket category found. Use `!setticketcategory` or `/setticketcategory`.")
-    else:
-        await ctx.send(f"✅ Current ticket category: **{category.name}**")
+    await ctx.send(f"✅ Current ticket category: **{category.name}**" if category else "❌ No ticket category found.")
 
 
-# ---------------- SALLY / UTILITY COMMANDS ----------------
-@bot.hybrid_command(name="sallyspeak", description="Make the bot say a message")
+@bot.command(name="setwelcome")
+@commands.has_permissions(administrator=True)
+async def setwelcome(ctx: commands.Context, *, message: str = DEFAULT_WELCOME_MESSAGE) -> None:
+    if ctx.guild is None or not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("❌ This command only works inside a server text channel.")
+        return
+    config = guild_config(ctx.guild.id)
+    config["welcome_channel_id"] = ctx.channel.id
+    config["welcome_message"] = message
+    await save_server_settings()
+    await ctx.send(f"✅ Welcome channel set to {ctx.channel.mention}. Message: `{message}`")
+
+
+@bot.command(name="setwallchannel")
+@commands.has_permissions(administrator=True)
+async def setwallchannel(ctx: commands.Context) -> None:
+    if ctx.guild is None or not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("❌ This command only works inside a server text channel.")
+        return
+    config = guild_config(ctx.guild.id)
+    config["wall_channel_id"] = ctx.channel.id
+    await save_server_settings()
+    await ctx.send(f"✅ Wall channel set to {ctx.channel.mention}.")
+
+
+@bot.command(name="setleaveschannel", aliases=["setgulitcategory", "setguiltchannel", "setguiltcategory"])
+@commands.has_permissions(administrator=True)
+async def setleaveschannel(ctx: commands.Context) -> None:
+    if ctx.guild is None or not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("❌ This command only works inside a server text channel.")
+        return
+    config = guild_config(ctx.guild.id)
+    config["leaves_channel_id"] = ctx.channel.id
+    config["guilt_channel_id"] = ctx.channel.id
+    await save_server_settings()
+    await ctx.send(f"✅ Leaves / Board of Guilt channel set to {ctx.channel.mention}.")
+
+
+@bot.command(name="setstaffrole")
+@commands.has_permissions(administrator=True)
+async def setstaffrole(ctx: commands.Context, role: discord.Role) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    config = guild_config(ctx.guild.id)
+    config["staff_role_ids"] = [role.id]
+    await save_server_settings()
+    await ctx.send(f"✅ Staff role set to {role.mention}.")
+
+
+@bot.command(name="addstaffrole")
+@commands.has_permissions(administrator=True)
+async def addstaffrole(ctx: commands.Context, role: discord.Role) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    config = guild_config(ctx.guild.id)
+    ids = config.setdefault("staff_role_ids", [])
+    if role.id not in ids:
+        ids.append(role.id)
+    await save_server_settings()
+    await ctx.send(f"✅ Added staff role {role.mention}.")
+
+
+@bot.command(name="removestaffrole")
+@commands.has_permissions(administrator=True)
+async def removestaffrole(ctx: commands.Context, role: discord.Role) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    config = guild_config(ctx.guild.id)
+    ids = config.setdefault("staff_role_ids", [])
+    if role.id in ids:
+        ids.remove(role.id)
+    await save_server_settings()
+    await ctx.send(f"✅ Removed staff role {role.mention}.")
+
+
+# ============================================================
+# PREFIX COMMANDS - AVAILABILITY
+# ============================================================
+@bot.command(name="setavailability")
+@commands.has_permissions(administrator=True)
+async def setavailability_prefix(ctx: commands.Context, start_time: str, end_time: str) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    try:
+        start_minutes = parse_time_to_minutes(start_time)
+        end_minutes = parse_time_to_minutes(end_time)
+    except ValueError as exc:
+        await ctx.send(f"❌ {exc}")
+        return
+    config = guild_config(ctx.guild.id)
+    config["availability"] = {
+        "timezone": DEFAULT_TIMEZONE,
+        "start": format_minutes(start_minutes),
+        "end": format_minutes(end_minutes),
+        "enabled": True,
+    }
+    await save_server_settings()
+    await send_or_update_ticket_panel(ctx.guild)
+    await ctx.send(f"✅ Availability set to {format_minutes(start_minutes)} to {format_minutes(end_minutes)} UK.")
+
+
+@bot.command(name="clearavailability")
+@commands.has_permissions(administrator=True)
+async def clearavailability_prefix(ctx: commands.Context) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    config = guild_config(ctx.guild.id)
+    config["availability"] = default_guild_config()["availability"]
+    await save_server_settings()
+    await send_or_update_ticket_panel(ctx.guild)
+    await ctx.send("✅ Availability reset to 9am to 10pm UK.")
+
+
+@bot.command(name="setunavailable")
+@commands.has_permissions(administrator=True)
+async def setunavailable_prefix(ctx: commands.Context, start_time: str, end_time: str, *, message: str = DEFAULT_UNAVAILABLE_MESSAGE) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    config = guild_config(ctx.guild.id)
+    try:
+        start_dt, end_dt = make_unavailable_window(config, start_time, end_time)
+    except ValueError as exc:
+        await ctx.send(f"❌ {exc}")
+        return
+    config["temporary_unavailable"] = {
+        "start_iso": start_dt.isoformat(),
+        "end_iso": end_dt.isoformat(),
+        "message": message,
+    }
+    config["last_availability_status"] = None
+    await save_server_settings()
+    await send_or_update_ticket_panel(ctx.guild)
+    await ctx.send(f"✅ Temporary unavailable set from {format_dt(start_dt)} to {format_dt(end_dt)} UK.")
+
+
+@bot.command(name="clearunavailable")
+@commands.has_permissions(administrator=True)
+async def clearunavailable_prefix(ctx: commands.Context) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    config = guild_config(ctx.guild.id)
+    config["temporary_unavailable"] = None
+    config["last_availability_status"] = None
+    await save_server_settings()
+    await send_or_update_ticket_panel(ctx.guild)
+    await ctx.send("✅ Temporary unavailable cleared. Ticket panel is back to normal availability.")
+
+
+@bot.command(name="availability")
+async def availability_prefix(ctx: commands.Context) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    state = get_availability_state(ctx.guild.id)
+    await ctx.send(f"⏰ **{state['title']}** — {state['panel_line']}\n{state['message']}")
+
+
+@bot.command(name="refreshticketpanel")
+@commands.has_permissions(administrator=True)
+async def refreshticketpanel_prefix(ctx: commands.Context) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    message = await send_or_update_ticket_panel(ctx.guild)
+    await ctx.send("✅ Ticket panel refreshed." if message else "❌ Ticket panel channel is not set. Run `/setup` or `/tickets`.")
+
+
+# ============================================================
+# PREFIX COMMANDS - TICKETS
+# ============================================================
+@bot.command(name="tickets", aliases=["ticket"])
+@commands.has_permissions(administrator=True)
+async def tickets(ctx: commands.Context) -> None:
+    if ctx.guild is None or not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("❌ This command only works inside a server text channel.")
+        return
+    config = guild_config(ctx.guild.id)
+    config["ticket_panel_channel_id"] = ctx.channel.id
+    await save_server_settings()
+    await send_or_update_ticket_panel(ctx.guild, ctx.channel, force_new=True)
+
+
+@bot.command(name="tickets2")
+@commands.has_permissions(administrator=True)
+async def tickets2(ctx: commands.Context) -> None:
+    embed = ticket_panel_embed(ctx.guild.id if ctx.guild else 0, normal=False)
+    await ctx.send(embed=embed, view=Tickets2Button())
+
+
+@bot.command(name="claim")
 @commands.has_permissions(manage_messages=True)
-@app_commands.describe(message="Message for the bot to send")
-async def sallyspeak(ctx: commands.Context, *, message: str) -> None:
-    if ctx.interaction is None:
-        try:
-            await ctx.message.delete()
-        except discord.HTTPException:
-            pass
+async def claim_ticket(ctx: commands.Context) -> None:
+    if ctx.guild is None or not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("❌ This command only works inside a ticket channel.")
+        return
+    data = ticket_owners.get(str(ctx.channel.id))
+    if not isinstance(data, dict):
+        await ctx.send("❌ This is not a tracked ticket.")
+        return
+    data["claimed_by"] = ctx.author.id
+    await save_ticket_owners()
+    await ctx.send(f"✅ Ticket claimed by {ctx.author.mention}.")
 
-    await ctx.send(message)
 
-
-@bot.hybrid_command(name="embed", description="Send a simple embed")
+@bot.command(name="unclaim")
 @commands.has_permissions(manage_messages=True)
-@app_commands.describe(title="Embed title", description="Embed description")
-async def embed_command(ctx: commands.Context, title: str, *, description: str) -> None:
-    if ctx.interaction is None:
-        try:
-            await ctx.message.delete()
-        except discord.HTTPException:
-            pass
+async def unclaim_ticket(ctx: commands.Context) -> None:
+    if ctx.guild is None or not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("❌ This command only works inside a ticket channel.")
+        return
+    data = ticket_owners.get(str(ctx.channel.id))
+    if not isinstance(data, dict):
+        await ctx.send("❌ This is not a tracked ticket.")
+        return
+    data["claimed_by"] = None
+    await save_ticket_owners()
+    await ctx.send("✅ Ticket unclaimed.")
 
-    embed = discord.Embed(
-        title=title,
-        description=description,
-        color=discord.Color.purple(),
+
+# ============================================================
+# PREFIX COMMANDS - MODERATION
+# ============================================================
+@bot.command(name="warn")
+@commands.has_permissions(manage_messages=True)
+async def prefix_warn(ctx: commands.Context, member: discord.Member, *, reason: str) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    warning_count = await add_warning(ctx.guild.id, member.id)
+    await send_wall_log(member, reason, "Manual warning", "Manual staff warning", warning_count, ctx.author)
+    await ctx.send(
+        f"⚠️ {member.mention} has been warned by {ctx.author.mention}.\nReason: {reason}\nWarnings: {warning_count}/{MAX_WARNINGS}"
     )
+    if warning_count >= MAX_WARNINGS:
+        await punish_if_needed(ctx.guild, ctx.channel, member, reason, warning_count)
 
+
+@bot.command(name="warnings")
+@commands.has_permissions(manage_messages=True)
+async def warnings_cmd(ctx: commands.Context, member: discord.Member | None = None) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    member = member or ctx.author
+    if not isinstance(member, discord.Member):
+        await ctx.send("❌ I could not identify that member.")
+        return
+    count = get_warnings(ctx.guild.id, member.id)
+    await ctx.send(f"⚠️ {member.mention} has {count}/{MAX_WARNINGS} warnings.")
+
+
+@bot.command(name="clearwarnings")
+@commands.has_permissions(manage_messages=True)
+async def clearwarnings_cmd(ctx: commands.Context, member: discord.Member) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    await clear_warnings_for(ctx.guild.id, member.id)
+    await ctx.send(f"✅ Cleared warnings for {member.mention}.")
+
+
+@bot.command(name="knobstatus")
+@commands.has_permissions(manage_messages=True)
+async def knobstatus(ctx: commands.Context) -> None:
+    banned_list = "\n".join(f"- {phrase}" for phrase in BANNED_PHRASES)
+    embed = discord.Embed(
+        title="🔨 Knob Bot Status",
+        description=(
+            "Knob moderation is active.\n\n"
+            f"Punishment: {PUNISHMENT_ON_MAX_WARNINGS.title()} after {MAX_WARNINGS} warnings\n"
+            "Bad messages are automatically deleted.\n\n"
+            "Banned phrases:\n"
+            f"{banned_list[:3500]}"
+        ),
+        color=discord.Color.red(),
+    )
     await ctx.send(embed=embed)
 
 
-@bot.hybrid_command(name="rules", description="Send the server rules embed")
-async def rules(ctx: commands.Context) -> None:
-    if ctx.interaction is None:
-        try:
-            await ctx.message.delete()
-        except discord.HTTPException:
-            pass
+@bot.command(name="manualwall")
+@commands.has_permissions(manage_messages=True)
+async def manualwall(ctx: commands.Context, member: discord.Member, *, offence: str) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    warning_count = await add_warning(ctx.guild.id, member.id)
+    await send_wall_log(member, offence, "Manual warning", "Manual staff report", warning_count, ctx.author)
+    await ctx.send(f"🧱 Added {member.mention} to the Wall of Knobs.")
 
+
+@bot.command(name="testguilt")
+@commands.has_permissions(administrator=True)
+async def testguilt(ctx: commands.Context) -> None:
+    await ctx.send("⚖️ Board of Guilt is alive. Nobody is safe.")
+
+
+# ============================================================
+# PREFIX COMMANDS - SMART MESSAGES
+# ============================================================
+@bot.command(name="addsmartmessage")
+@commands.has_permissions(manage_messages=True)
+async def addsmartmessage(ctx: commands.Context, trigger: str, *, response: str) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    async with smart_lock:
+        rules = get_guild_smart_messages(ctx.guild.id)
+        rules[trigger.lower()] = {"response": response, "cooldown": SMART_MESSAGE_COOLDOWN}
+        await save_smart_messages()
+    await ctx.send(f"✅ Smart message added for `{trigger}`.")
+
+
+@bot.command(name="removesmartmessage")
+@commands.has_permissions(manage_messages=True)
+async def removesmartmessage(ctx: commands.Context, trigger: str) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    async with smart_lock:
+        rules = get_guild_smart_messages(ctx.guild.id)
+        rules.pop(trigger.lower(), None)
+        await save_smart_messages()
+    await ctx.send(f"✅ Smart message removed for `{trigger}`.")
+
+
+@bot.command(name="listsmartmessages")
+@commands.has_permissions(manage_messages=True)
+async def listsmartmessages(ctx: commands.Context) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    rules = get_guild_smart_messages(ctx.guild.id)
+    if not rules:
+        await ctx.send("No smart messages set.")
+        return
+    lines = [f"`{trigger}` → {str(data.get('response', ''))[:80]}" for trigger, data in rules.items() if isinstance(data, dict)]
+    await ctx.send("🧠 Smart messages:\n" + "\n".join(lines)[:1800])
+
+
+@bot.command(name="clearsmartmessages")
+@commands.has_permissions(manage_messages=True)
+async def clearsmartmessages(ctx: commands.Context) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    async with smart_lock:
+        smart_messages[str(ctx.guild.id)] = {}
+        await save_smart_messages()
+    await ctx.send("✅ Removed all smart messages in this server.")
+
+
+# ============================================================
+# PREFIX COMMANDS - UTILITY / GIVEAWAYS
+# ============================================================
+@bot.command(name="sallyspeak")
+@commands.has_permissions(manage_messages=True)
+async def sallyspeak(ctx: commands.Context, *, message: str) -> None:
+    try:
+        await ctx.message.delete()
+    except discord.HTTPException:
+        pass
+    await ctx.send(message)
+
+
+@bot.command(name="embed")
+@commands.has_permissions(manage_messages=True)
+async def embed_command(ctx: commands.Context, title: str, *, description: str) -> None:
+    try:
+        await ctx.message.delete()
+    except discord.HTTPException:
+        pass
+    embed = discord.Embed(title=title, description=description, color=discord.Color.purple())
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="rules")
+async def rules(ctx: commands.Context) -> None:
+    try:
+        await ctx.message.delete()
+    except discord.HTTPException:
+        pass
     embed = discord.Embed(
         title="📜 Server Rules 📜",
         description=(
@@ -2235,462 +2284,746 @@ async def rules(ctx: commands.Context) -> None:
             "5. Respect staff.\n"
             "6. Use tickets for trades.\n"
             "7. No modded accounts.\n"
-            "8. No money services or boosts.\n"
+            "8. No money services or boosts."
         ),
         color=discord.Color.red(),
     )
-
     await ctx.send(embed=embed)
 
 
-@bot.hybrid_command(name="slotinfo", description="Show slot info")
+@bot.command(name="slotinfo")
 async def slotinfo(ctx: commands.Context) -> None:
     await ctx.send("❌ Sloty has been removed from this bot.")
 
 
-# ---------------- SMART MESSAGE COMMANDS ----------------
-@bot.hybrid_command(name="addsmartmessage", description="Add an automatic smart reply trigger")
-@commands.has_permissions(manage_messages=True)
-@app_commands.describe(trigger="Word or phrase XSI should detect", reply="Reply to send. Supports {user}, {server}, {username}, {display_name}.")
-async def addsmartmessage(ctx: commands.Context, trigger: str, *, reply: str) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
-        return
-
-    clean_trigger = normalize_text(trigger)
-    clean_reply = reply.strip()
-
-    if not clean_trigger or not clean_reply:
-        await ctx.send("❌ Use: `!addsmartmessage price Please open a ticket for prices.`")
-        return
-
-    if len(clean_trigger) > 80:
-        await ctx.send("❌ Trigger is too long. Keep it under 80 characters.")
-        return
-
-    if len(clean_reply) > 1500:
-        await ctx.send("❌ Reply is too long. Keep it under 1500 characters.")
-        return
-
-    smart_messages = get_smart_messages(ctx.guild.id)
-    smart_messages[clean_trigger] = clean_reply
-    get_guild_settings(ctx.guild.id)["smart_messages"] = smart_messages
-    save_server_settings()
-
-    await ctx.send(f"✅ Smart message added. Trigger: `{discord.utils.escape_markdown(clean_trigger)}`")
-
-
-@bot.hybrid_command(name="removesmartmessage", description="Remove a smart reply trigger")
-@commands.has_permissions(manage_messages=True)
-@app_commands.describe(trigger="Trigger to remove")
-async def removesmartmessage(ctx: commands.Context, trigger: str) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
-        return
-
-    clean_trigger = normalize_text(trigger)
-    smart_messages = get_smart_messages(ctx.guild.id)
-
-    if clean_trigger not in smart_messages:
-        await ctx.send("❌ That smart message trigger was not found.")
-        return
-
-    smart_messages.pop(clean_trigger, None)
-    get_guild_settings(ctx.guild.id)["smart_messages"] = smart_messages
-    save_server_settings()
-
-    await ctx.send(f"✅ Removed smart message trigger: `{discord.utils.escape_markdown(clean_trigger)}`")
-
-
-@bot.hybrid_command(name="listsmartmessages", description="List this server's smart message triggers")
-@commands.has_permissions(manage_messages=True)
-async def listsmartmessages(ctx: commands.Context) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
-        return
-
-    smart_messages = get_smart_messages(ctx.guild.id)
-
-    if not smart_messages:
-        await ctx.send("No smart messages set. Add one with `!addsmartmessage price Please open a ticket.`")
-        return
-
-    lines = []
-    for trigger, reply in smart_messages.items():
-        safe_reply = discord.utils.escape_markdown(reply[:80])
-        lines.append(f"• `{discord.utils.escape_markdown(trigger)}` → {safe_reply}")
-
-    embed = discord.Embed(
-        title="🧠 Smart Messages",
-        description="\n".join(lines)[:4000],
-        color=discord.Color.blue(),
-    )
-    await ctx.send(embed=embed)
-
-
-@bot.hybrid_command(name="clearsmartmessages", description="Remove all smart messages in this server")
+@bot.command(name="giveaway")
 @commands.has_permissions(administrator=True)
-async def clearsmartmessages(ctx: commands.Context) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
-        return
-
-    get_guild_settings(ctx.guild.id)["smart_messages"] = {}
-    save_server_settings()
-
-    await ctx.send("✅ Cleared all smart messages for this server.")
-
-
-# ---------------- GIVEAWAY COMMANDS ----------------
-def make_prize(amount: int, prize_type: str) -> str | None:
-    prize_type = prize_type.lower().strip()
-
-    if prize_type == "normal":
-        prize = f"🚘 {amount} Normal Car"
-        if amount != 1:
-            prize += "s"
-        return prize
-
-    if prize_type == "hard trade":
-        prize = f"✨ {amount} Hard Trade"
-        if amount != 1:
-            prize += "s"
-        return prize
-
-    if prize_type == "very hard trade":
-        prize = f"💎 {amount} Very Hard Trade"
-        if amount != 1:
-            prize += "s"
-        return prize
-
-    return None
-
-
-async def finish_giveaway(channel_id: int, message_id: int, prize: str, seconds: int, test: bool = False) -> None:
-    await asyncio.sleep(seconds)
-
-    channel = bot.get_channel(channel_id)
-
-    if channel is None:
-        try:
-            channel = await bot.fetch_channel(channel_id)
-        except discord.HTTPException:
-            log.warning("Giveaway channel could not be found: %s", channel_id)
-            return
-
-    if not isinstance(channel, discord.TextChannel):
-        log.warning("Giveaway channel is not a text channel: %s", channel_id)
-        return
-
-    try:
-        message = await channel.fetch_message(message_id)
-    except discord.HTTPException:
-        await channel.send("❌ Giveaway message was deleted or could not be found.")
-        return
-
-    entries: list[discord.User | discord.Member] = []
-
-    for reaction in message.reactions:
-        if str(reaction.emoji) == "🎉":
-            async for user in reaction.users():
-                if not user.bot:
-                    entries.append(user)
-
-    if len(entries) == 0:
-        await channel.send(f"❌ No one entered the {prize} giveaway.")
-        return
-
-    winner = random.choice(entries)
-
-    end_embed = discord.Embed(
-        title="🎉 GIVEAWAY ENDED 🎉",
-        description=(
-            f"Prize: {prize}\n\n"
-            f"Winner: {winner.mention}"
-        ),
-        color=discord.Color.green(),
-    )
-
-    await channel.send(embed=end_embed)
-    await channel.send(f"🎉 Congratulations {winner.mention}! You won {prize}!")
-
-
-async def start_giveaway(ctx: commands.Context, prize: str, seconds: int, test: bool = False) -> None:
-    title = "🎉 TEST GIVEAWAY 🎉" if test else "🎉 GIVEAWAY 🎉"
-    time_text = "30 seconds" if test else "24 hours"
-
-    embed = discord.Embed(
-        title=title,
-        description=(
-            f"Prize: {prize}\n\n"
-            "React with 🎉 to enter!\n\n"
-            f"⏰ Ends in {time_text}"
-        ),
-        color=discord.Color.gold(),
-    )
-
-    message = await ctx.send(embed=embed)
-    await message.add_reaction("🎉")
-
-    # Giveaway completion works for both prefix and slash command starts.
-    asyncio.create_task(finish_giveaway(message.channel.id, message.id, prize, seconds, test=test))
-
-
-GIVEAWAY_PRIZE_CHOICES = [
-    app_commands.Choice(name="Normal", value="normal"),
-    app_commands.Choice(name="Hard Trade", value="hard trade"),
-    app_commands.Choice(name="Very Hard Trade", value="very hard trade"),
-]
-
-
-@bot.hybrid_command(name="giveaway", description="Start a 24-hour giveaway")
-@commands.has_permissions(administrator=True)
-@app_commands.describe(amount="Amount of cars/trades", prize_type="Prize type")
-@app_commands.choices(prize_type=GIVEAWAY_PRIZE_CHOICES)
 async def giveaway(ctx: commands.Context, amount: int, *, prize_type: str) -> None:
-    if amount <= 0:
-        await ctx.send("❌ Amount must be at least 1.")
+    if not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("❌ This command only works in a text channel.")
         return
-
-    prize = make_prize(amount, prize_type)
-
-    if prize is None:
-        await ctx.send(
-            "❌ Use:\n"
-            "`!giveaway 4 Normal`\n"
-            "`!giveaway 5 Hard Trade`\n"
-            "`!giveaway 2 Very Hard Trade`"
-        )
-        return
-
-    await start_giveaway(ctx, prize, GIVEAWAY_TIME)
+    result = await start_giveaway_in_channel(ctx.channel, amount, prize_type, GIVEAWAY_TIME)
+    await ctx.send(result)
 
 
-@bot.hybrid_command(name="testgiveaway", description="Start a 30-second test giveaway")
+@bot.command(name="testgiveaway")
 @commands.has_permissions(administrator=True)
-@app_commands.describe(amount="Amount of cars/trades", prize_type="Prize type")
-@app_commands.choices(prize_type=GIVEAWAY_PRIZE_CHOICES)
 async def testgiveaway(ctx: commands.Context, amount: int, *, prize_type: str) -> None:
-    if amount <= 0:
-        await ctx.send("❌ Amount must be at least 1.")
+    if not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("❌ This command only works in a text channel.")
         return
+    result = await start_giveaway_in_channel(ctx.channel, amount, prize_type, TEST_GIVEAWAY_TIME, test=True)
+    await ctx.send(result)
 
-    prize = make_prize(amount, prize_type)
 
-    if prize is None:
-        await ctx.send("❌ Use: `!testgiveaway 1 Normal`")
+# ============================================================
+# SLASH COMMANDS
+# ============================================================
+@bot.tree.command(name="version", description="Show the running XSI build version")
+async def slash_version(interaction: discord.Interaction) -> None:
+    await interaction.response.send_message(f"✅ {VERSION}\nBuild tag: `{BUILD_TAG}`", ephemeral=True)
+
+
+@bot.tree.command(name="buildcheck", description="Show XSI build and slash-command diagnostics")
+async def slash_buildcheck(interaction: discord.Interaction) -> None:
+    names = sorted(command.name for command in bot.tree.get_commands())
+    critical = ["clearsetup", "setunavailable", "refreshticketpanel", "setavailability", "availability", "clearunavailable"]
+    missing = [name for name in critical if name not in names]
+    missing_text = ", ".join(missing) if missing else "None"
+    await interaction.response.send_message(
+        f"✅ {VERSION}\n"
+        f"Build tag: `{BUILD_TAG}`\n"
+        f"Slash commands loaded in memory: `{len(names)}`\n"
+        f"Critical commands missing: `{missing_text}`",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="synccommands", description="Sync XSI slash commands in this server")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_synccommands(interaction: discord.Interaction) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ Run this inside a server.", ephemeral=True)
         return
+    bot.tree.clear_commands(guild=interaction.guild)
+    bot.tree.copy_global_to(guild=interaction.guild)
+    synced = await bot.tree.sync(guild=interaction.guild)
+    await interaction.response.send_message(f"✅ Synced {len(synced)} slash command(s) in **{interaction.guild.name}**.")
 
-    await start_giveaway(ctx, prize, TEST_GIVEAWAY_TIME, test=True)
+
+@bot.tree.command(name="setup", description="Create XSI categories/channels and save setup")
+@app_commands.describe(exclude="Optional: giveaways,welcome,transcripts etc")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_setup(interaction: discord.Interaction, exclude: str = "") -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    await interaction.response.defer(thinking=True)
+    embed = await run_setup(interaction.guild, interaction.channel, parse_setup_exclusions(exclude))
+    await interaction.followup.send(embed=embed)
 
 
-# ---------------- KNOB COMMANDS ----------------
-@bot.hybrid_command(name="warn", description="Manually warn a member")
-@commands.has_permissions(manage_messages=True)
+@bot.tree.command(name="clearsetup", description="Clear XSI setup; optionally delete XSI-created channels")
+@app_commands.describe(
+    mode="keep, delete_created, or factory_wipe",
+    confirm="Required for delete modes. Type YES.",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_clearsetup(interaction: discord.Interaction, mode: str = "keep", confirm: str = "") -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    embed, _ = await clear_setup_impl(interaction.guild, mode, confirm)
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="checksetup", description="Show current XSI setup for this server")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_checksetup(interaction: discord.Interaction) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    config = guild_config(interaction.guild.id)
+
+    def ch_line(label: str, key: str) -> str:
+        channel_id = config.get(key)
+        channel = interaction.guild.get_channel(int(channel_id)) if channel_id else None
+        return f"{label}: {channel.mention if isinstance(channel, discord.TextChannel) else 'Not set'}"
+
+    category = get_ticket_category(interaction.guild)
+    roles = staff_role_objects(interaction.guild)
+    state = get_availability_state(interaction.guild.id)
+    embed = discord.Embed(title="🔧 XSI Setup Check", color=discord.Color.blue())
+    embed.add_field(name="Ticket Category", value=category.name if category else "Not set", inline=False)
+    embed.add_field(
+        name="Channels",
+        value="\n".join(
+            [
+                ch_line("Ticket Panel", "ticket_panel_channel_id"),
+                ch_line("Welcome", "welcome_channel_id"),
+                ch_line("Wall", "wall_channel_id"),
+                ch_line("Leaves", "leaves_channel_id"),
+                ch_line("Transcripts", "transcript_channel_id"),
+                ch_line("Staff Logs", "staff_log_channel_id"),
+                ch_line("Rules", "rules_channel_id"),
+                ch_line("Giveaways", "giveaways_channel_id"),
+            ]
+        )[:1024],
+        inline=False,
+    )
+    embed.add_field(name="Staff Roles", value=", ".join(role.mention for role in roles) or "None", inline=False)
+    embed.add_field(name="Availability", value=f"{state['title']} — {state['panel_line']}", inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="requiredpermissions", description="Show the permissions XSI needs")
+async def slash_requiredpermissions(interaction: discord.Interaction) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    await interaction.response.send_message(embed=build_required_permissions_embed(interaction.guild), ephemeral=True)
+
+
+@bot.tree.command(name="setticketcategory", description="Set this channel's category as ticket category")
+@app_commands.describe(category_id="Optional category ID. Leave blank to use this channel's category.")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_setticketcategory(interaction: discord.Interaction, category_id: str = "") -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    if category_id:
+        category = interaction.guild.get_channel(int(category_id)) if category_id.isdigit() else None
+    else:
+        category = interaction.channel.category if isinstance(interaction.channel, discord.TextChannel) else None
+    if not isinstance(category, discord.CategoryChannel):
+        await interaction.response.send_message("❌ Could not find a valid category.", ephemeral=True)
+        return
+    config = guild_config(interaction.guild.id)
+    config["ticket_category_id"] = category.id
+    await save_server_settings()
+    await interaction.response.send_message(f"✅ Ticket category set to **{category.name}**.", ephemeral=True)
+
+
+@bot.tree.command(name="checkcategory", description="Show the current ticket category")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_checkcategory(interaction: discord.Interaction) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    category = get_ticket_category(interaction.guild)
+    await interaction.response.send_message(
+        f"✅ Current ticket category: **{category.name}**" if category else "❌ No ticket category found.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="setwelcome", description="Set this channel as welcome channel")
+@app_commands.describe(message="Welcome message. Use {user}, {server}, {username}, {display_name}.")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_setwelcome(interaction: discord.Interaction, message: str = DEFAULT_WELCOME_MESSAGE) -> None:
+    if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This only works inside a server text channel.", ephemeral=True)
+        return
+    config = guild_config(interaction.guild.id)
+    config["welcome_channel_id"] = interaction.channel.id
+    config["welcome_message"] = message
+    await save_server_settings()
+    await interaction.response.send_message(f"✅ Welcome channel set to {interaction.channel.mention}.", ephemeral=True)
+
+
+@bot.tree.command(name="setwallchannel", description="Set this channel as Wall of Knobs log channel")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_setwallchannel(interaction: discord.Interaction) -> None:
+    if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This only works inside a server text channel.", ephemeral=True)
+        return
+    config = guild_config(interaction.guild.id)
+    config["wall_channel_id"] = interaction.channel.id
+    await save_server_settings()
+    await interaction.response.send_message(f"✅ Wall channel set to {interaction.channel.mention}.", ephemeral=True)
+
+
+@bot.tree.command(name="setleaveschannel", description="Set this channel as leaves / Board of Guilt channel")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_setleaveschannel(interaction: discord.Interaction) -> None:
+    if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This only works inside a server text channel.", ephemeral=True)
+        return
+    config = guild_config(interaction.guild.id)
+    config["leaves_channel_id"] = interaction.channel.id
+    config["guilt_channel_id"] = interaction.channel.id
+    await save_server_settings()
+    await interaction.response.send_message(f"✅ Leaves / Board of Guilt channel set to {interaction.channel.mention}.", ephemeral=True)
+
+
+@bot.tree.command(name="setgulitcategory", description="Set this channel as Board of Guilt/leaves channel")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_setgulitcategory(interaction: discord.Interaction) -> None:
+    await slash_setleaveschannel(interaction)
+
+
+@bot.tree.command(name="setstaffrole", description="Set the only staff role for XSI")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_setstaffrole(interaction: discord.Interaction, role: discord.Role) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    config = guild_config(interaction.guild.id)
+    config["staff_role_ids"] = [role.id]
+    await save_server_settings()
+    await interaction.response.send_message(f"✅ Staff role set to {role.mention}.", ephemeral=True)
+
+
+@bot.tree.command(name="addstaffrole", description="Add another staff role for tickets/mod bypass")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_addstaffrole(interaction: discord.Interaction, role: discord.Role) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    config = guild_config(interaction.guild.id)
+    ids = config.setdefault("staff_role_ids", [])
+    if role.id not in ids:
+        ids.append(role.id)
+    await save_server_settings()
+    await interaction.response.send_message(f"✅ Added staff role {role.mention}.", ephemeral=True)
+
+
+@bot.tree.command(name="removestaffrole", description="Remove a staff role from XSI")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_removestaffrole(interaction: discord.Interaction, role: discord.Role) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    config = guild_config(interaction.guild.id)
+    ids = config.setdefault("staff_role_ids", [])
+    if role.id in ids:
+        ids.remove(role.id)
+    await save_server_settings()
+    await interaction.response.send_message(f"✅ Removed staff role {role.mention}.", ephemeral=True)
+
+
+@bot.tree.command(name="setavailability", description="Set normal availability times for the ticket panel")
+@app_commands.describe(start_time="Example: 9am", end_time="Example: 10pm")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_setavailability(interaction: discord.Interaction, start_time: str, end_time: str) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    try:
+        start_minutes = parse_time_to_minutes(start_time)
+        end_minutes = parse_time_to_minutes(end_time)
+    except ValueError as exc:
+        await interaction.response.send_message(f"❌ {exc}", ephemeral=True)
+        return
+    config = guild_config(interaction.guild.id)
+    config["availability"] = {
+        "timezone": DEFAULT_TIMEZONE,
+        "start": format_minutes(start_minutes),
+        "end": format_minutes(end_minutes),
+        "enabled": True,
+    }
+    config["last_availability_status"] = None
+    await save_server_settings()
+    await send_or_update_ticket_panel(interaction.guild)
+    await interaction.response.send_message(
+        f"✅ Availability set to {format_minutes(start_minutes)} to {format_minutes(end_minutes)} UK.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="clearavailability", description="Reset normal availability to 9am-10pm UK")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_clearavailability(interaction: discord.Interaction) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    config = guild_config(interaction.guild.id)
+    config["availability"] = default_guild_config()["availability"]
+    config["last_availability_status"] = None
+    await save_server_settings()
+    await send_or_update_ticket_panel(interaction.guild)
+    await interaction.response.send_message("✅ Availability reset to 9am to 10pm UK.", ephemeral=True)
+
+
+@bot.tree.command(name="setunavailable", description="Set temporary unavailable time and update ticket panel")
+@app_commands.describe(
+    start_time="Example: 3pm",
+    end_time="Example: 6pm",
+    message="Message sent in tickets during unavailable time",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_setunavailable(
+    interaction: discord.Interaction,
+    start_time: str,
+    end_time: str,
+    message: str = DEFAULT_UNAVAILABLE_MESSAGE,
+) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    config = guild_config(interaction.guild.id)
+    try:
+        start_dt, end_dt = make_unavailable_window(config, start_time, end_time)
+    except ValueError as exc:
+        await interaction.response.send_message(f"❌ {exc}", ephemeral=True)
+        return
+    config["temporary_unavailable"] = {
+        "start_iso": start_dt.isoformat(),
+        "end_iso": end_dt.isoformat(),
+        "message": message,
+    }
+    config["last_availability_status"] = None
+    await save_server_settings()
+    await send_or_update_ticket_panel(interaction.guild)
+    await interaction.response.send_message(
+        f"✅ Temporary unavailable set from {format_dt(start_dt)} to {format_dt(end_dt)} UK. Ticket panel updated.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="clearunavailable", description="Clear temporary unavailable and refresh ticket panel")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_clearunavailable(interaction: discord.Interaction) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    config = guild_config(interaction.guild.id)
+    config["temporary_unavailable"] = None
+    config["last_availability_status"] = None
+    await save_server_settings()
+    await send_or_update_ticket_panel(interaction.guild)
+    await interaction.response.send_message("✅ Temporary unavailable cleared. Ticket panel refreshed.", ephemeral=True)
+
+
+@bot.tree.command(name="availability", description="Show current XSI ticket availability")
+async def slash_availability(interaction: discord.Interaction) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    state = get_availability_state(interaction.guild.id)
+    await interaction.response.send_message(
+        f"⏰ **{state['title']}** — {state['panel_line']}\n{state['message']}",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="refreshticketpanel", description="Refresh the existing ticket panel message")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_refreshticketpanel(interaction: discord.Interaction) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    message = await send_or_update_ticket_panel(interaction.guild)
+    await interaction.followup.send(
+        "✅ Ticket panel refreshed." if message else "❌ Ticket panel channel is not set. Run `/setup` or `/tickets`.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="tickets", description="Post the ticket panel in this channel")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_tickets(interaction: discord.Interaction) -> None:
+    if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This only works inside a server text channel.", ephemeral=True)
+        return
+    config = guild_config(interaction.guild.id)
+    config["ticket_panel_channel_id"] = interaction.channel.id
+    await save_server_settings()
+    await send_or_update_ticket_panel(interaction.guild, interaction.channel, force_new=True)
+    await interaction.response.send_message("✅ Ticket panel posted.", ephemeral=True)
+
+
+@bot.tree.command(name="tickets2", description="Post a basic ticket panel in this channel")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_tickets2(interaction: discord.Interaction) -> None:
+    if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This only works inside a server text channel.", ephemeral=True)
+        return
+    await interaction.channel.send(embed=ticket_panel_embed(interaction.guild.id, normal=False), view=Tickets2Button())
+    await interaction.response.send_message("✅ Basic ticket panel posted.", ephemeral=True)
+
+
+@bot.tree.command(name="claim", description="Claim the current ticket")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_claim(interaction: discord.Interaction) -> None:
+    if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This only works inside a ticket channel.", ephemeral=True)
+        return
+    data = ticket_owners.get(str(interaction.channel.id))
+    if not isinstance(data, dict):
+        await interaction.response.send_message("❌ This is not a tracked ticket.", ephemeral=True)
+        return
+    data["claimed_by"] = interaction.user.id
+    await save_ticket_owners()
+    await interaction.response.send_message(f"✅ Ticket claimed by {interaction.user.mention}.")
+
+
+@bot.tree.command(name="unclaim", description="Unclaim the current ticket")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_unclaim(interaction: discord.Interaction) -> None:
+    if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This only works inside a ticket channel.", ephemeral=True)
+        return
+    data = ticket_owners.get(str(interaction.channel.id))
+    if not isinstance(data, dict):
+        await interaction.response.send_message("❌ This is not a tracked ticket.", ephemeral=True)
+        return
+    data["claimed_by"] = None
+    await save_ticket_owners()
+    await interaction.response.send_message("✅ Ticket unclaimed.")
+
+
+@bot.tree.command(name="warn", description="Manually warn a member")
 @app_commands.describe(member="The member to warn", reason="The reason for the warning")
-async def warn(ctx: commands.Context, member: discord.Member, *, reason: str) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_warn(interaction: discord.Interaction, member: discord.Member, reason: str) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
         return
-
-    warning_count = add_warning(ctx.guild.id, member.id)
-
-    await send_wall_log(
-        member=member,
-        offence=reason,
-        punishment="Manual warning",
-        message_content="Manual staff warning",
-        warning_count=warning_count,
-        moderator=ctx.author,
+    warning_count = await add_warning(interaction.guild.id, member.id)
+    await send_wall_log(member, reason, "Manual warning", "Manual slash warning", warning_count, interaction.user)
+    await interaction.response.send_message(
+        f"⚠️ {member.mention} has been warned by {interaction.user.mention}.\nReason: {reason}\nWarnings: {warning_count}/{MAX_WARNINGS}"
     )
-
-    await ctx.send(
-        f"⚠️ {member.mention} has been warned by {ctx.author.mention}.\n"
-        f"Reason: {reason}\n"
-        f"Warnings: {warning_count}/{MAX_WARNINGS}"
-    )
-
     if warning_count >= MAX_WARNINGS:
-        punishment = "Banned" if PUNISHMENT_ON_MAX_WARNINGS.lower() == "ban" else "Kicked"
-
-        await send_wall_log(
-            member=member,
-            offence=reason,
-            punishment=punishment,
-            message_content="Reached max warnings from manual warning",
-            warning_count=warning_count,
-            moderator=ctx.author,
-        )
-
-        await punish_if_needed(ctx.guild, ctx.channel, member, reason, warning_count)
+        await punish_if_needed(interaction.guild, interaction.channel, member, reason, warning_count)
 
 
-@bot.hybrid_command(name="warnings", description="Check a member's warnings")
-@commands.has_permissions(manage_messages=True)
-@app_commands.describe(member="Member to check. Leave empty to check yourself.")
-async def warnings_command(ctx: commands.Context, member: Optional[discord.Member] = None) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
+@bot.tree.command(name="warnings", description="Show a member's warnings")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_warnings(interaction: discord.Interaction, member: discord.Member | None = None) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
         return
-
-    target = member
-
-    if target is None:
-        if not isinstance(ctx.author, discord.Member):
-            await ctx.send("❌ I could not identify that member.")
-            return
-        target = ctx.author
-
-    count = get_warnings(ctx.guild.id, target.id)
-    await ctx.send(f"⚠️ {target.mention} has {count}/{MAX_WARNINGS} warnings.")
+    member = member or interaction.user
+    count = get_warnings(interaction.guild.id, member.id)
+    await interaction.response.send_message(f"⚠️ {member.mention} has {count}/{MAX_WARNINGS} warnings.")
 
 
-@bot.hybrid_command(name="clearwarnings", description="Clear a member's warnings")
-@commands.has_permissions(manage_messages=True)
-@app_commands.describe(member="Member whose warnings should be cleared")
-async def clearwarnings(ctx: commands.Context, member: discord.Member) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
+@bot.tree.command(name="clearwarnings", description="Clear a member's warnings")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_clearwarnings(interaction: discord.Interaction, member: discord.Member) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
         return
+    await clear_warnings_for(interaction.guild.id, member.id)
+    await interaction.response.send_message(f"✅ Cleared warnings for {member.mention}.")
 
-    clear_warnings(ctx.guild.id, member.id)
-    await ctx.send(f"✅ Cleared warnings for {member.mention}.")
 
-
-@bot.hybrid_command(name="knobstatus", description="Show moderation status and banned phrases")
-@commands.has_permissions(manage_messages=True)
-async def knobstatus(ctx: commands.Context) -> None:
+@bot.tree.command(name="knobstatus", description="Show moderation status")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_knobstatus(interaction: discord.Interaction) -> None:
     banned_list = "\n".join(f"- {phrase}" for phrase in BANNED_PHRASES)
-
     embed = discord.Embed(
         title="🔨 Knob Bot Status",
         description=(
             "Knob moderation is active.\n\n"
             f"Punishment: {PUNISHMENT_ON_MAX_WARNINGS.title()} after {MAX_WARNINGS} warnings\n"
-            "Bad messages are automatically deleted.\n"
-            "Sales, car trading, and Discord links are allowed.\n\n"
+            "Bad messages are automatically deleted.\n\n"
             "Banned phrases:\n"
             f"{banned_list[:3500]}"
         ),
         color=discord.Color.red(),
     )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    await ctx.send(embed=embed)
 
-
-@bot.hybrid_command(name="manualwall", description="Manually add someone to the Wall of Knobs")
-@commands.has_permissions(manage_messages=True)
-@app_commands.describe(member="Member to add", offence="Offence/reason")
-async def manualwall(ctx: commands.Context, member: discord.Member, *, offence: str) -> None:
-    if ctx.guild is None:
-        await ctx.send("❌ This command only works inside a server.")
+@bot.tree.command(name="manualwall", description="Manually add someone to Wall of Knobs")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_manualwall(interaction: discord.Interaction, member: discord.Member, offence: str) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
         return
+    warning_count = await add_warning(interaction.guild.id, member.id)
+    await send_wall_log(member, offence, "Manual warning", "Manual staff report", warning_count, interaction.user)
+    await interaction.response.send_message(f"🧱 Added {member.mention} to the Wall of Knobs.")
 
-    warning_count = add_warning(ctx.guild.id, member.id)
 
-    await send_wall_log(
-        member=member,
-        offence=offence,
-        punishment="Manual warning",
-        message_content="Manual staff report",
-        warning_count=warning_count,
-        moderator=ctx.author,
+@bot.tree.command(name="testguilt", description="Test the Board of Guilt")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_testguilt(interaction: discord.Interaction) -> None:
+    await interaction.response.send_message("⚖️ Board of Guilt is alive. Nobody is safe.")
+
+
+@bot.tree.command(name="addsmartmessage", description="Add a smart auto reply")
+@app_commands.describe(trigger="Word/phrase to detect", response="Reply. Use {user}, {server}, {username}, {display_name}.")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_addsmartmessage(interaction: discord.Interaction, trigger: str, response: str) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    async with smart_lock:
+        rules = get_guild_smart_messages(interaction.guild.id)
+        rules[trigger.lower()] = {"response": response, "cooldown": SMART_MESSAGE_COOLDOWN}
+        await save_smart_messages()
+    await interaction.response.send_message(f"✅ Smart message added for `{trigger}`.", ephemeral=True)
+
+
+@bot.tree.command(name="removesmartmessage", description="Remove a smart auto reply")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_removesmartmessage(interaction: discord.Interaction, trigger: str) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    async with smart_lock:
+        rules = get_guild_smart_messages(interaction.guild.id)
+        rules.pop(trigger.lower(), None)
+        await save_smart_messages()
+    await interaction.response.send_message(f"✅ Smart message removed for `{trigger}`.", ephemeral=True)
+
+
+@bot.tree.command(name="listsmartmessages", description="List smart auto replies")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_listsmartmessages(interaction: discord.Interaction) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    rules = get_guild_smart_messages(interaction.guild.id)
+    if not rules:
+        await interaction.response.send_message("No smart messages set.", ephemeral=True)
+        return
+    lines = [f"`{trigger}` → {str(data.get('response', ''))[:80]}" for trigger, data in rules.items() if isinstance(data, dict)]
+    await interaction.response.send_message("🧠 Smart messages:\n" + "\n".join(lines)[:1800], ephemeral=True)
+
+
+@bot.tree.command(name="clearsmartmessages", description="Remove all smart messages in this server")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_clearsmartmessages(interaction: discord.Interaction) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    async with smart_lock:
+        smart_messages[str(interaction.guild.id)] = {}
+        await save_smart_messages()
+    await interaction.response.send_message("✅ Removed all smart messages in this server.", ephemeral=True)
+
+
+@bot.tree.command(name="sallyspeak", description="Make XSI say a message")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_sallyspeak(interaction: discord.Interaction, message: str) -> None:
+    if not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This only works in a text channel.", ephemeral=True)
+        return
+    await interaction.channel.send(message)
+    await interaction.response.send_message("✅ Sent.", ephemeral=True)
+
+
+@bot.tree.command(name="embed", description="Send a simple embed")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_embed(interaction: discord.Interaction, title: str, description: str) -> None:
+    if not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This only works in a text channel.", ephemeral=True)
+        return
+    embed = discord.Embed(title=title, description=description, color=discord.Color.purple())
+    await interaction.channel.send(embed=embed)
+    await interaction.response.send_message("✅ Embed sent.", ephemeral=True)
+
+
+@bot.tree.command(name="rules", description="Post server rules embed")
+async def slash_rules(interaction: discord.Interaction) -> None:
+    embed = discord.Embed(
+        title="📜 Server Rules 📜",
+        description=(
+            "1. No BS.\n"
+            "2. No NSFW.\n"
+            "3. English only.\n"
+            "4. No scams.\n"
+            "5. Respect staff.\n"
+            "6. Use tickets for trades.\n"
+            "7. No modded accounts.\n"
+            "8. No money services or boosts."
+        ),
+        color=discord.Color.red(),
     )
-
-    await ctx.send(f"🧱 Added {member.mention} to the Wall of Knobs.")
-
-
-@bot.hybrid_command(name="testguilt", description="Test the Board of Guilt system")
-@commands.has_permissions(administrator=True)
-async def testguilt(ctx: commands.Context) -> None:
-    await ctx.send("⚖️ Board of Guilt is alive. Nobody is safe.")
+    await interaction.response.send_message(embed=embed)
 
 
-# ---------------- ERROR HANDLERS ----------------
+@bot.tree.command(name="slotinfo", description="Show Sloty removal notice")
+async def slash_slotinfo(interaction: discord.Interaction) -> None:
+    await interaction.response.send_message("❌ Sloty has been removed from this bot.")
+
+
+@bot.tree.command(name="giveaway", description="Start a 24 hour giveaway")
+@app_commands.describe(prize_type="Normal, Hard Trade, or Very Hard Trade")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_giveaway(interaction: discord.Interaction, amount: int, prize_type: str) -> None:
+    if not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This only works in a text channel.", ephemeral=True)
+        return
+    result = await start_giveaway_in_channel(interaction.channel, amount, prize_type, GIVEAWAY_TIME)
+    await interaction.response.send_message(result, ephemeral=True)
+
+
+@bot.tree.command(name="testgiveaway", description="Start a 30 second test giveaway")
+@app_commands.describe(prize_type="Normal, Hard Trade, or Very Hard Trade")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_testgiveaway(interaction: discord.Interaction, amount: int, prize_type: str) -> None:
+    if not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This only works in a text channel.", ephemeral=True)
+        return
+    result = await start_giveaway_in_channel(interaction.channel, amount, prize_type, TEST_GIVEAWAY_TIME, test=True)
+    await interaction.response.send_message(result, ephemeral=True)
+
+
+# ============================================================
+# REQUIRED PERMISSIONS EMBED
+# ============================================================
+def build_required_permissions_embed(guild: discord.Guild) -> discord.Embed:
+    bot_member = guild.me or guild.get_member(bot.user.id if bot.user else 0)
+    perms = bot_member.guild_permissions if bot_member else discord.Permissions.none()
+
+    checks = [
+        ("View Channels", perms.view_channel, "see setup/ticket/log channels"),
+        ("Send Messages", perms.send_messages, "send replies, welcomes, panels, and logs"),
+        ("Read Message History", perms.read_message_history, "read ticket/giveaway messages"),
+        ("Manage Channels", perms.manage_channels, "create setup categories and ticket channels"),
+        ("Manage Messages", perms.manage_messages, "delete banned messages and clean commands"),
+        ("Embed Links", perms.embed_links, "send ticket, setup, warning, and log embeds"),
+        ("Add Reactions", perms.add_reactions, "add the giveaway reaction"),
+        ("Kick Members", perms.kick_members, "kick users after max warnings"),
+        ("Ban Members", perms.ban_members, "only needed if punishment mode is ban"),
+    ]
+    optional = [
+        ("Manage Roles", perms.manage_roles, "only needed later for autoroles/reaction roles"),
+    ]
+
+    def line(name: str, ok: bool, desc: str) -> str:
+        return f"{'✅' if ok else '❌'} **{name}** — {desc}"
+
+    embed = discord.Embed(
+        title="🔐 XSI Required Permissions",
+        description="Use this to check whether XSI can run setup, tickets, welcomes, logs, giveaways, and moderation correctly.",
+        color=discord.Color.green() if all(ok for _, ok, _ in checks) else discord.Color.orange(),
+    )
+    embed.add_field(name="Required Bot Permissions", value="\n".join(line(*item) for item in checks)[:1024], inline=False)
+    embed.add_field(name="Optional / Future Permissions", value="\n".join(line(*item) for item in optional)[:1024], inline=False)
+
+    if bot_member:
+        hierarchy = "✅ Bot role is available."
+        if guild.owner_id and bot_member.top_role <= guild.default_role:
+            hierarchy = "⚠️ Bot role looks low. Move XSI's role higher for moderation."
+        embed.add_field(name="Role Hierarchy", value=hierarchy, inline=False)
+
+    app_id = bot.user.id if bot.user else 0
+    perms_value = discord.Permissions(
+        view_channel=True,
+        send_messages=True,
+        read_message_history=True,
+        manage_channels=True,
+        manage_messages=True,
+        embed_links=True,
+        add_reactions=True,
+        kick_members=True,
+        ban_members=True,
+    ).value
+    invite = f"https://discord.com/oauth2/authorize?client_id={app_id}&permissions={perms_value}&scope=bot%20applications.commands"
+    embed.add_field(name="Invite / Reinvite", value=f"Use an invite with `bot` and `applications.commands` scopes.\n{invite}", inline=False)
+    embed.set_footer(text="Also enable Message Content Intent and Server Members Intent in the Discord Developer Portal.")
+    return embed
+
+
+# ============================================================
+# ERROR HANDLERS
+# ============================================================
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
     if isinstance(error, app_commands.MissingPermissions):
         message = "❌ You do not have permission to use that command."
-        if interaction.response.is_done():
-            await interaction.followup.send(message, ephemeral=True)
-        else:
-            await interaction.response.send_message(message, ephemeral=True)
-        return
-
-    log.exception("Slash command error: %s", error)
+    else:
+        log.exception("Slash command error: %s", error)
+        message = "❌ Something went wrong. Check Railway logs."
 
     if interaction.response.is_done():
-        await interaction.followup.send("❌ Something went wrong. Check Railway logs.", ephemeral=True)
+        await interaction.followup.send(message, ephemeral=True)
     else:
-        await interaction.response.send_message("❌ Something went wrong. Check Railway logs.", ephemeral=True)
+        await interaction.response.send_message(message, ephemeral=True)
 
 
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError) -> None:
     if isinstance(error, commands.CommandNotFound):
         return
-
     if isinstance(error, commands.MissingPermissions):
         await ctx.send("❌ You do not have permission to use that command.")
         return
-
     if isinstance(error, commands.MemberNotFound):
         await ctx.send("❌ I could not find that member.")
         return
-
     if isinstance(error, commands.RoleNotFound):
         await ctx.send("❌ I could not find that role.")
         return
-
-    if isinstance(error, commands.ChannelNotFound):
-        await ctx.send("❌ I could not find that channel.")
-        return
-
     if isinstance(error, commands.MissingRequiredArgument):
         await ctx.send(
             "❌ Missing info. Examples:\n"
-            "`!setup` or `!setup no giveaways`\n"
-            "`!setticketcategory`\n"
-            "`!setgulitcategory` / `!setleaveschannel`\n"
-            "`!setwallchannel`\n"
-            "`!setwelcome`\n"
-            "`!addsmartmessage price Please open a ticket.`\n"
-            "`!tickets`\n"
-            "`!tickets2`\n"
-            "`!giveaway 4 Normal`\n"
-            "`!sallyspeak message`\n"
-            "`!warn @user reason`\n"
-            "`!warnings @user`\n"
-            "`!clearwarnings @user`"
+            "`!setup`\n"
+            "`!setup no giveaways`\n"
+            "`!clearsetup keep`\n"
+            "`!clearsetup delete_created YES`\n"
+            "`!setunavailable 3pm 6pm I am unavailable right now.`\n"
+            "`!refreshticketpanel`\n"
+            "`!warn @user reason`"
         )
         return
-
     if isinstance(error, commands.BadArgument):
-        await ctx.send("❌ Bad command format. Check the number/user/channel/role you typed.")
+        await ctx.send("❌ Bad command format. Check the number/user/role/time you typed.")
         return
-
-    if isinstance(error, commands.HybridCommandError):
-        original = error.original
-        if isinstance(original, app_commands.MissingPermissions):
-            await ctx.send("❌ You do not have permission to use that command.")
-            return
-        log.exception("Hybrid command failed: %s", original)
-    elif isinstance(error, commands.CommandInvokeError):
+    if isinstance(error, commands.CommandInvokeError):
         log.exception("Command failed: %s", error.original)
     else:
         log.exception("Command error: %s", error)
-
     await ctx.send("❌ Something went wrong. Check Railway logs.")
 
 
-# ---------------- RUN BOT ----------------
+# ============================================================
+# RUN BOT
+# ============================================================
 def main() -> None:
     token = os.getenv(TOKEN_NAME)
-
     if not token:
         log.error("❌ %s not found in Railway variables.", TOKEN_NAME)
         return
-
     bot.run(token)
 
 
