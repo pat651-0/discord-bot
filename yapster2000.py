@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import os
@@ -24,8 +25,8 @@ from discord.ext import commands, tasks
 # python xsi_bot_full_setup_requiredpermissions.py
 # ============================================================
 
-VERSION = "XSI full setup build 2026-06-16 / ticket-hidden-ui-dm-kick"
-BUILD_TAG = "XSI-FORCE-45-TICKET-HIDDEN-UI-DM-KICK"
+VERSION = "XSI full setup build 2026-06-16 / records-kick-testmode"
+BUILD_TAG = "XSI-FORCE-45-RECORDS-KICK-TESTMODE"
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
@@ -48,6 +49,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 SERVER_SETTINGS_FILE = DATA_DIR / "xsi_server_settings.json"
 WARNINGS_FILE = DATA_DIR / "xsi_warnings.json"
 TICKET_OWNERS_FILE = DATA_DIR / "xsi_ticket_owners.json"
+TICKET_RECORDS_FILE = DATA_DIR / "xsi_ticket_records.json"
 SMART_MESSAGES_FILE = DATA_DIR / "xsi_smart_messages.json"
 GIVEAWAYS_FILE = DATA_DIR / "xsi_giveaways.json"
 
@@ -70,6 +72,9 @@ AWAY_AUTO_REPLY_COOLDOWN = 60 * 60
 AWAY_AUTO_REPLY_DELETE_AFTER = 5 * 60
 GIVEAWAY_TIME = 24 * 60 * 60
 TEST_GIVEAWAY_TIME = 30
+RECORD_CHANNEL_DELETE_AFTER = 60 * 60
+MAX_RECORD_SELECT_OPTIONS = 25
+MAX_RECORD_PREVIEW_CHUNKS = 20
 
 # Optional: put your Discord user ID here if you want your ticket replies to DM ticket owners.
 OWNER_USER_IDS = [1137385938155221073]
@@ -268,12 +273,14 @@ def save_json(path: Path, data: Any) -> None:
 server_settings: dict[str, Any] = load_json(SERVER_SETTINGS_FILE, {})
 warnings_store: dict[str, Any] = load_json(WARNINGS_FILE, {})
 ticket_owners: dict[str, Any] = load_json(TICKET_OWNERS_FILE, {})
+ticket_records: dict[str, Any] = load_json(TICKET_RECORDS_FILE, {})
 smart_messages: dict[str, Any] = load_json(SMART_MESSAGES_FILE, {})
 active_giveaways: dict[str, Any] = load_json(GIVEAWAYS_FILE, {})
 
 settings_lock = asyncio.Lock()
 warnings_lock = asyncio.Lock()
 tickets_lock = asyncio.Lock()
+record_lock = asyncio.Lock()
 smart_lock = asyncio.Lock()
 giveaway_lock = asyncio.Lock()
 
@@ -290,6 +297,10 @@ async def save_ticket_owners() -> None:
     save_json(TICKET_OWNERS_FILE, ticket_owners)
 
 
+async def save_ticket_records() -> None:
+    save_json(TICKET_RECORDS_FILE, ticket_records)
+
+
 async def save_smart_messages() -> None:
     save_json(SMART_MESSAGES_FILE, smart_messages)
 
@@ -304,6 +315,7 @@ class XSIBot(commands.Bot):
         self.add_view(TicketsButton())
         self.add_view(Tickets2Button())
         self.add_view(CloseButton())
+        self.add_view(RecordCloseButton())
         if not availability_refresher.is_running():
             availability_refresher.start()
         if not giveaway_checker.is_running():
@@ -332,6 +344,7 @@ def default_guild_config() -> dict[str, Any]:
         "leaves_channel_id": None,
         "guilt_channel_id": None,
         "transcript_channel_id": None,
+        "record_category_id": None,
         "staff_log_channel_id": None,
         "rules_channel_id": None,
         "giveaways_channel_id": None,
@@ -831,62 +844,130 @@ async def punish_if_needed(
     return True
 
 
-async def kick_member_with_checks(
+
+def parse_xsikick_reason(raw_reason: str | None) -> tuple[bool, str]:
+    """Return (test_mode, reason) for prefix commands.
+
+    Supported prefix examples:
+    !xsikick @user being rude
+    !xsikick @user --test being rude
+    !xsikick @user test being rude
+    !xsikick @user being rude --test
+    """
+    reason = (raw_reason or "").strip()
+    if not reason:
+        return False, "No reason provided."
+
+    test_markers = {"--test", "test", "testmode", "test-mode", "dryrun", "dry-run", "simulate", "simulation"}
+    words = reason.split()
+    test_mode = False
+
+    while words and words[0].lower() in test_markers:
+        test_mode = True
+        words.pop(0)
+
+    while words and words[-1].lower() in test_markers:
+        test_mode = True
+        words.pop()
+
+    clean_reason = " ".join(words).strip() or "No reason provided."
+    return test_mode, clean_reason
+
+
+async def send_xsikick_log(
     guild: discord.Guild,
-    actor: discord.Member | discord.User,
     member: discord.Member,
+    moderator: discord.Member | discord.User,
     reason: str,
+    test_mode: bool,
+    result: str,
+) -> None:
+    config = guild_config(guild.id)
+    channel = await get_text_channel(guild, config.get("staff_log_channel_id"))
+    if channel is None:
+        return
+
+    embed = discord.Embed(
+        title="🧪 XSI Kick Test" if test_mode else "👢 XSI Kick",
+        description="No one was kicked. This was a test run." if test_mode else "A member was kicked with XSI.",
+        color=discord.Color.orange() if test_mode else discord.Color.red(),
+        timestamp=datetime.now(UK_TIMEZONE),
+    )
+    embed.add_field(name="Target", value=f"{member.mention}\n`{member}`\nID: `{member.id}`", inline=False)
+    embed.add_field(name="Moderator", value=f"{moderator.mention}\n`{moderator}`\nID: `{moderator.id}`", inline=False)
+    embed.add_field(name="Reason", value=discord.utils.escape_markdown(reason[:1000]), inline=False)
+    embed.add_field(name="Result", value=result[:1000], inline=False)
+    embed.set_thumbnail(url=member.display_avatar.url)
+
+    try:
+        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException:
+        pass
+
+
+async def run_xsikick(
+    guild: discord.Guild,
+    member: discord.Member,
+    moderator: discord.Member | discord.User,
+    reason: str,
+    *,
+    test_mode: bool = False,
 ) -> tuple[bool, str]:
-    clean_reason = str(reason or "").strip() or "No reason provided"
-
-    if member.id == actor.id:
-        return False, "❌ You cannot kick yourself."
-
-    if member == guild.owner:
-        return False, "❌ I cannot kick the server owner."
-
-    if member.guild_permissions.administrator:
-        return False, "❌ I cannot kick an administrator."
-
-    if bot.user is not None and member.id == bot.user.id:
-        return False, "❌ I cannot kick myself."
-
-    if isinstance(actor, discord.Member) and actor != guild.owner:
-        if actor.top_role <= member.top_role:
-            return False, "❌ You cannot kick someone with an equal or higher role than you."
+    reason = (reason or "").strip() or "No reason provided."
+    if len(reason) > 900:
+        reason = reason[:897] + "..."
 
     bot_member = guild.me or guild.get_member(bot.user.id if bot.user else 0)
     if bot_member is None:
         return False, "❌ I could not check my role hierarchy."
 
+    if member.id == guild.owner_id:
+        return False, "❌ I cannot kick the server owner."
+
+    if member.id == moderator.id:
+        return False, "❌ You cannot kick yourself with this command."
+
+    if member.id == bot_member.id:
+        return False, "❌ I cannot kick myself."
+
+    if member.guild_permissions.administrator:
+        return False, f"❌ I will not kick {member.mention} because they are an administrator."
+
     if not bot_member.guild_permissions.kick_members:
         return False, "❌ I need the Kick Members permission."
 
     if bot_member.top_role <= member.top_role:
-        return False, "❌ My role is not high enough to kick that member. Move my role above theirs."
+        return False, f"❌ I cannot kick {member.mention} because my role is not high enough."
 
+    if isinstance(moderator, discord.Member) and moderator.id != guild.owner_id:
+        if moderator.top_role <= member.top_role:
+            return False, f"❌ You cannot kick {member.mention} because their role is equal to or higher than yours."
+
+    action_name = "would be kicked" if test_mode else "was kicked"
+    audit_reason = f"XSI kick by {moderator} ({moderator.id}): {reason}"[:512]
+
+    if test_mode:
+        result = f"🧪 TEST MODE: {member.mention} {action_name}. No action was taken."
+        await send_xsikick_log(guild, member, moderator, reason, True, result)
+        return True, f"{result}\nReason: {reason}"
+
+    dm_status = "DM sent."
     try:
-        await member.send(
-            f"🔨 You were kicked from {guild.name}.\n"
-            f"Reason: {clean_reason}"
-        )
+        await member.send(f"🔨 You were kicked from {guild.name}.\nReason: {reason}")
     except discord.HTTPException:
-        pass
-
-    audit_reason = f"Kicked by {actor} ({actor.id}). Reason: {clean_reason}"[:512]
+        dm_status = "Could not DM the member."
 
     try:
         await member.kick(reason=audit_reason)
     except discord.Forbidden:
-        return False, "❌ I do not have permission to kick that member."
-    except discord.HTTPException:
-        return False, "❌ Discord rejected the kick action."
+        return False, f"❌ I do not have permission to kick {member.mention}. Check my role and Kick Members permission."
+    except discord.HTTPException as exc:
+        log.exception("XSI kick failed: %s", exc)
+        return False, "❌ Discord rejected the kick. Check Railway logs."
 
-    await send_staff_log(
-        guild,
-        f"🔨 {actor.mention} kicked {member.mention} (`{member.id}`). Reason: {clean_reason[:500]}",
-    )
-    return True, f"✅ Kicked {member.mention}. Reason: {clean_reason}"
+    result = f"✅ {member.mention} {action_name} by {moderator.mention}. {dm_status}"
+    await send_xsikick_log(guild, member, moderator, reason, False, result)
+    return True, f"{result}\nReason: {reason}"
 
 
 # ============================================================
@@ -937,6 +1018,536 @@ def staff_role_objects(guild: discord.Guild) -> list[discord.Role]:
         if role is not None:
             roles.append(role)
     return roles
+
+
+# ============================================================
+# TICKET RECORD HELPERS
+# ============================================================
+def _record_bucket(guild_id: int) -> dict[str, Any]:
+    gid = str(guild_id)
+    bucket = ticket_records.get(gid)
+    if not isinstance(bucket, dict):
+        bucket = {}
+        ticket_records[gid] = bucket
+
+    if not isinstance(bucket.get("records"), dict):
+        bucket["records"] = {}
+    if not isinstance(bucket.get("by_channel"), dict):
+        bucket["by_channel"] = {}
+    try:
+        next_id = int(bucket.get("next_id", 1))
+    except (TypeError, ValueError):
+        next_id = 1
+    if next_id < 1:
+        next_id = 1
+    bucket["next_id"] = next_id
+    return bucket
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _record_datetime_text(timestamp: Any) -> str:
+    value = _safe_int(timestamp, 0)
+    if value <= 0:
+        return "Unknown"
+    return datetime.fromtimestamp(value, UK_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def _record_short_time(timestamp: Any) -> str:
+    value = _safe_int(timestamp, 0)
+    if value <= 0:
+        return "Unknown time"
+    return datetime.fromtimestamp(value, UK_TIMEZONE).strftime("%d %b %H:%M")
+
+
+def _record_user_text(user_id: Any, fallback: str = "Unknown") -> str:
+    uid = _safe_int(user_id, 0)
+    if uid <= 0:
+        return fallback
+    return f"{fallback} ({uid})" if fallback and fallback != str(uid) else str(uid)
+
+
+def _record_copy(guild_id: int, record_id: str) -> dict[str, Any] | None:
+    bucket = _record_bucket(guild_id)
+    record = bucket["records"].get(str(record_id))
+    if not isinstance(record, dict):
+        return None
+    # JSON round trip gives us a cheap isolated copy for rendering outside the lock.
+    return json.loads(json.dumps(record))
+
+
+def _new_record_id(bucket: dict[str, Any]) -> str:
+    records = bucket.setdefault("records", {})
+    next_id = _safe_int(bucket.get("next_id"), 1)
+    while str(next_id) in records:
+        next_id += 1
+    bucket["next_id"] = next_id + 1
+    return str(next_id)
+
+
+def _append_record_event_unlocked(
+    record: dict[str, Any],
+    event_type: str,
+    text: str,
+    *,
+    actor: discord.Member | discord.User | None = None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    events = record.setdefault("events", [])
+    if not isinstance(events, list):
+        events = []
+        record["events"] = events
+
+    event = {
+        "time": int(time.time()),
+        "type": event_type,
+        "text": text,
+    }
+    if actor is not None:
+        event["actor_id"] = actor.id
+        event["actor_name"] = str(actor)
+    if extra:
+        event.update(extra)
+    events.append(event)
+
+
+async def create_ticket_record(channel: discord.TextChannel, owner: discord.Member | discord.User, auto_messages: bool) -> str:
+    async with record_lock:
+        bucket = _record_bucket(channel.guild.id)
+        record_id = _new_record_id(bucket)
+        record = {
+            "record_id": record_id,
+            "guild_id": channel.guild.id,
+            "channel_id": channel.id,
+            "channel_name": channel.name,
+            "owner_id": owner.id,
+            "owner_name": str(owner),
+            "created_at": int(time.time()),
+            "closed_at": None,
+            "closed_by_id": None,
+            "closed_by_name": None,
+            "close_reason": None,
+            "status": "open",
+            "auto_messages": bool(auto_messages),
+            "claimed_by": None,
+            "messages": [],
+            "events": [],
+        }
+        _append_record_event_unlocked(
+            record,
+            "ticket_opened",
+            f"Ticket opened by {owner}.",
+            actor=owner,
+            extra={"channel_id": channel.id, "channel_name": channel.name},
+        )
+        bucket["records"][record_id] = record
+        bucket["by_channel"][str(channel.id)] = record_id
+        await save_ticket_records()
+        return record_id
+
+
+async def get_or_create_ticket_record_for_channel(channel: discord.TextChannel, data: dict[str, Any]) -> str:
+    guild_id = channel.guild.id
+    record_id = str(data.get("record_id") or "")
+
+    async with record_lock:
+        bucket = _record_bucket(guild_id)
+        if record_id and isinstance(bucket["records"].get(record_id), dict):
+            bucket["by_channel"][str(channel.id)] = record_id
+            await save_ticket_records()
+            return record_id
+
+        mapped_id = str(bucket["by_channel"].get(str(channel.id)) or "")
+        if mapped_id and isinstance(bucket["records"].get(mapped_id), dict):
+            data["record_id"] = mapped_id
+            ticket_owners[str(channel.id)] = data
+            await save_ticket_records()
+            await save_ticket_owners()
+            return mapped_id
+
+        owner_id = _safe_int(data.get("owner_id"), 0)
+        owner = channel.guild.get_member(owner_id)
+        owner_name = str(owner) if owner is not None else str(owner_id or "Unknown")
+        created_at = _safe_int(data.get("created_at"), int(time.time()))
+        new_id = _new_record_id(bucket)
+        record = {
+            "record_id": new_id,
+            "guild_id": guild_id,
+            "channel_id": channel.id,
+            "channel_name": channel.name,
+            "owner_id": owner_id,
+            "owner_name": owner_name,
+            "created_at": created_at,
+            "closed_at": None,
+            "closed_by_id": None,
+            "closed_by_name": None,
+            "close_reason": None,
+            "status": "open",
+            "auto_messages": bool(data.get("auto_messages", False)),
+            "claimed_by": data.get("claimed_by"),
+            "messages": [],
+            "events": [],
+        }
+        _append_record_event_unlocked(
+            record,
+            "record_started",
+            "Record tracking started for this existing active ticket.",
+            extra={"channel_id": channel.id, "channel_name": channel.name},
+        )
+        bucket["records"][new_id] = record
+        bucket["by_channel"][str(channel.id)] = new_id
+        data["record_id"] = new_id
+        ticket_owners[str(channel.id)] = data
+        await save_ticket_records()
+        await save_ticket_owners()
+        return new_id
+
+
+async def append_ticket_record_event(
+    guild_id: int,
+    record_id: str,
+    event_type: str,
+    text: str,
+    *,
+    actor: discord.Member | discord.User | None = None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    async with record_lock:
+        bucket = _record_bucket(guild_id)
+        record = bucket["records"].get(str(record_id))
+        if not isinstance(record, dict):
+            return
+        _append_record_event_unlocked(record, event_type, text, actor=actor, extra=extra)
+        await save_ticket_records()
+
+
+async def append_ticket_record_event_for_channel(
+    channel: discord.TextChannel,
+    data: dict[str, Any],
+    event_type: str,
+    text: str,
+    *,
+    actor: discord.Member | discord.User | None = None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    record_id = await get_or_create_ticket_record_for_channel(channel, data)
+    await append_ticket_record_event(channel.guild.id, record_id, event_type, text, actor=actor, extra=extra)
+
+
+async def append_ticket_record_message(message: discord.Message) -> None:
+    if not isinstance(message.channel, discord.TextChannel) or message.guild is None:
+        return
+
+    data = ticket_owners.get(str(message.channel.id))
+    if not isinstance(data, dict):
+        return
+
+    record_id = await get_or_create_ticket_record_for_channel(message.channel, data)
+    attachments = [
+        {
+            "filename": attachment.filename,
+            "url": attachment.url,
+            "size": attachment.size,
+        }
+        for attachment in message.attachments
+    ]
+
+    async with record_lock:
+        bucket = _record_bucket(message.guild.id)
+        record = bucket["records"].get(record_id)
+        if not isinstance(record, dict):
+            return
+        messages = record.setdefault("messages", [])
+        if not isinstance(messages, list):
+            messages = []
+            record["messages"] = messages
+        messages.append(
+            {
+                "time": int(message.created_at.timestamp()) if message.created_at else int(time.time()),
+                "message_id": message.id,
+                "author_id": message.author.id,
+                "author_name": str(message.author),
+                "content": message.content or "",
+                "attachments": attachments,
+                "jump_url": message.jump_url,
+            }
+        )
+        await save_ticket_records()
+
+
+async def mark_ticket_record_closed(
+    channel: discord.TextChannel,
+    data: dict[str, Any],
+    closer: discord.Member | discord.User,
+    reason: str = "Closed with ticket button.",
+) -> None:
+    record_id = await get_or_create_ticket_record_for_channel(channel, data)
+    async with record_lock:
+        bucket = _record_bucket(channel.guild.id)
+        record = bucket["records"].get(record_id)
+        if not isinstance(record, dict):
+            return
+        now = int(time.time())
+        record["status"] = "closed"
+        record["closed_at"] = now
+        record["closed_by_id"] = closer.id
+        record["closed_by_name"] = str(closer)
+        record["close_reason"] = reason
+        record["claimed_by"] = data.get("claimed_by")
+        _append_record_event_unlocked(
+            record,
+            "ticket_closed",
+            f"Ticket closed by {closer}. Reason: {reason}",
+            actor=closer,
+            extra={"channel_id": channel.id, "channel_name": channel.name},
+        )
+        await save_ticket_records()
+
+
+async def ensure_active_records_for_member(guild: discord.Guild, member: discord.Member | discord.User) -> None:
+    for channel_id, data in list(ticket_owners.items()):
+        if not isinstance(data, dict):
+            continue
+        if _safe_int(data.get("guild_id"), 0) != guild.id:
+            continue
+        if _safe_int(data.get("owner_id"), 0) != member.id:
+            continue
+        channel = guild.get_channel(_safe_int(channel_id, 0))
+        if isinstance(channel, discord.TextChannel):
+            await get_or_create_ticket_record_for_channel(channel, data)
+
+
+def find_ticket_records_for_member(guild_id: int, user_id: int) -> list[dict[str, Any]]:
+    bucket = _record_bucket(guild_id)
+    records = []
+    for record in bucket["records"].values():
+        if not isinstance(record, dict):
+            continue
+        if _safe_int(record.get("owner_id"), 0) == user_id:
+            records.append(record)
+    records.sort(key=lambda item: _safe_int(item.get("created_at"), 0), reverse=True)
+    return records
+
+
+def build_ticket_record_transcript(record: dict[str, Any]) -> str:
+    lines: list[str] = []
+    owner_text = _record_user_text(record.get("owner_id"), str(record.get("owner_name") or "Unknown"))
+    lines.append(f"XSI Ticket Record #{record.get('record_id', 'Unknown')}")
+    lines.append("=" * 60)
+    lines.append(f"Owner: {owner_text}")
+    lines.append(f"Status: {str(record.get('status') or 'unknown').title()}")
+    lines.append(f"Original Channel: #{record.get('channel_name', 'unknown')} ({record.get('channel_id', 'unknown')})")
+    lines.append(f"Created: {_record_datetime_text(record.get('created_at'))}")
+    if record.get("closed_at"):
+        closer_text = _record_user_text(record.get("closed_by_id"), str(record.get("closed_by_name") or "Unknown"))
+        lines.append(f"Closed: {_record_datetime_text(record.get('closed_at'))}")
+        lines.append(f"Closed By: {closer_text}")
+        lines.append(f"Close Reason: {record.get('close_reason') or 'No reason stored'}")
+    if record.get("claimed_by"):
+        lines.append(f"Claimed By ID: {record.get('claimed_by')}")
+    lines.append("")
+    lines.append("Timeline")
+    lines.append("-" * 60)
+
+    timeline: list[tuple[int, int, str]] = []
+    for index, event in enumerate(record.get("events") or []):
+        if not isinstance(event, dict):
+            continue
+        ts = _safe_int(event.get("time"), 0)
+        text = str(event.get("text") or event.get("type") or "Event")
+        actor = event.get("actor_name")
+        actor_id = event.get("actor_id")
+        if actor:
+            text += f" [actor: {actor} ({actor_id})]"
+        timeline.append((ts, index, f"[{_record_datetime_text(ts)}] EVENT: {text}"))
+
+    offset = len(timeline) + 1
+    for index, message in enumerate(record.get("messages") or []):
+        if not isinstance(message, dict):
+            continue
+        ts = _safe_int(message.get("time"), 0)
+        author = str(message.get("author_name") or "Unknown")
+        author_id = message.get("author_id")
+        content = str(message.get("content") or "").replace("\r", "")
+        if not content:
+            content = "[No text content]"
+        entry_lines = [f"[{_record_datetime_text(ts)}] MESSAGE: {author} ({author_id})", content]
+        attachments = message.get("attachments") or []
+        if attachments:
+            entry_lines.append("Attachments:")
+            for attachment in attachments:
+                if isinstance(attachment, dict):
+                    entry_lines.append(f"- {attachment.get('filename', 'attachment')}: {attachment.get('url', '')}")
+        if message.get("jump_url"):
+            entry_lines.append(f"Jump URL: {message.get('jump_url')}")
+        timeline.append((ts, offset + index, "\n".join(entry_lines)))
+
+    if not timeline:
+        lines.append("No events or messages were recorded.")
+    else:
+        for _, _, line in sorted(timeline, key=lambda item: (item[0], item[1])):
+            lines.append(line)
+            lines.append("")
+
+    return "\n".join(lines).strip() + "\n"
+
+
+def split_record_text(text: str, limit: int = 1800) -> list[str]:
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for line in text.splitlines():
+        addition = len(line) + 1
+        if current and current_len + addition > limit:
+            chunks.append("\n".join(current))
+            current = []
+            current_len = 0
+        if addition > limit:
+            while line:
+                chunks.append(line[:limit])
+                line = line[limit:]
+            continue
+        current.append(line)
+        current_len += addition
+    if current:
+        chunks.append("\n".join(current))
+    return chunks or [""]
+
+
+def safe_code_block(text: str) -> str:
+    return text.replace("```", "`\u200b``")
+
+
+def get_record_category(guild: discord.Guild) -> discord.CategoryChannel | None:
+    config = guild_config(guild.id)
+    category_id = config.get("record_category_id")
+    if not category_id:
+        return None
+    category = guild.get_channel(_safe_int(category_id, 0))
+    return category if isinstance(category, discord.CategoryChannel) else None
+
+
+async def delete_record_channel_later(guild_id: int, channel_id: int, seconds: int = RECORD_CHANNEL_DELETE_AFTER) -> None:
+    await asyncio.sleep(seconds)
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return
+    channel = guild.get_channel(channel_id)
+    if isinstance(channel, discord.TextChannel) and channel.name.startswith("record-"):
+        try:
+            await channel.delete(reason="XSI record channel expired")
+        except discord.HTTPException:
+            pass
+
+
+async def create_record_review_channel(
+    guild: discord.Guild,
+    requester: discord.Member | discord.User,
+    record: dict[str, Any],
+) -> discord.TextChannel | None:
+    bot_member = guild.me or guild.get_member(bot.user.id if bot.user else 0)
+    overwrites: dict[discord.Role | discord.Member, discord.PermissionOverwrite] = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+    }
+    if isinstance(requester, discord.Member):
+        overwrites[requester] = discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+            attach_files=True,
+        )
+    if bot_member is not None:
+        overwrites[bot_member] = discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+            manage_channels=True,
+            attach_files=True,
+        )
+    for role in staff_role_objects(guild):
+        overwrites[role] = discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+            attach_files=True,
+        )
+
+    owner_name = str(record.get("owner_name") or record.get("owner_id") or "user")
+    record_id = str(record.get("record_id") or "unknown")
+    channel_name = f"record-{clean_channel_name(owner_name)}-{record_id}"[:90]
+    category = get_record_category(guild)
+
+    try:
+        channel = await guild.create_text_channel(
+            name=channel_name,
+            category=category,
+            overwrites=overwrites,
+            reason=f"XSI ticket record opened by {requester} ({requester.id})",
+        )
+    except discord.HTTPException:
+        return None
+
+    owner_text = f"<@{record.get('owner_id')}>" if _safe_int(record.get("owner_id"), 0) else str(record.get("owner_name") or "Unknown")
+    transcript = build_ticket_record_transcript(record)
+    transcript_file = discord.File(
+        fp=io.BytesIO(transcript.encode("utf-8")),
+        filename=f"xsi-ticket-record-{record_id}.txt",
+    )
+    embed = discord.Embed(
+        title=f"📁 Ticket Record #{record_id}",
+        description=(
+            f"Owner: {owner_text}\n"
+            f"Status: **{str(record.get('status') or 'unknown').title()}**\n"
+            f"Created: `{_record_datetime_text(record.get('created_at'))}`\n"
+            f"Original Channel: `#{record.get('channel_name', 'unknown')}`\n\n"
+            "Use the button below when finished. This temporary record channel also auto-deletes after 1 hour."
+        ),
+        color=discord.Color.blurple(),
+    )
+    if record.get("closed_at"):
+        embed.add_field(name="Closed", value=_record_datetime_text(record.get("closed_at")), inline=True)
+        embed.add_field(name="Closed By", value=str(record.get("closed_by_name") or record.get("closed_by_id") or "Unknown"), inline=True)
+        embed.add_field(name="Reason", value=str(record.get("close_reason") or "No reason stored")[:1024], inline=False)
+    await channel.send(embed=embed, view=RecordCloseButton(), allowed_mentions=discord.AllowedMentions.none())
+    await channel.send("📄 Full record transcript:", file=transcript_file)
+
+    chunks = split_record_text(transcript)
+    for index, chunk in enumerate(chunks[:MAX_RECORD_PREVIEW_CHUNKS], start=1):
+        await channel.send(f"```txt\n{safe_code_block(chunk)}\n```")
+    if len(chunks) > MAX_RECORD_PREVIEW_CHUNKS:
+        await channel.send("⚠️ Preview stopped because the record is long. The attached `.txt` file contains the full record.")
+
+    asyncio.create_task(delete_record_channel_later(guild.id, channel.id))
+    return channel
+
+
+async def send_record_picker_response(
+    interaction: discord.Interaction,
+    member: discord.Member,
+) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    await ensure_active_records_for_member(interaction.guild, member)
+    records = find_ticket_records_for_member(interaction.guild.id, member.id)
+    if not records:
+        await interaction.response.send_message(
+            f"❌ No ticket records found for {member.mention}. Records are saved for tickets created or active after this update.",
+            ephemeral=True,
+        )
+        return
+    view = RecordPickerView(interaction.user.id, records[:MAX_RECORD_SELECT_OPTIONS])
+    extra = "" if len(records) <= MAX_RECORD_SELECT_OPTIONS else f"\nShowing newest {MAX_RECORD_SELECT_OPTIONS} records only."
+    await interaction.response.send_message(
+        f"📁 Pick which ticket record you want to open for {member.mention}.{extra}",
+        view=view,
+        ephemeral=True,
+    )
 
 
 def ticket_panel_embed(guild_id: int, normal: bool = True) -> discord.Embed:
@@ -1055,6 +1666,8 @@ async def create_ticket_channel(interaction: discord.Interaction, auto_messages:
         await interaction.followup.send("❌ Discord rejected the ticket channel creation. Check permissions/category limits.")
         return
 
+    record_id = await create_ticket_record(channel, user, auto_messages)
+
     async with tickets_lock:
         ticket_owners[str(channel.id)] = {
             "guild_id": guild.id,
@@ -1064,6 +1677,7 @@ async def create_ticket_channel(interaction: discord.Interaction, auto_messages:
             "auto_messages": auto_messages,
             "created_at": int(time.time()),
             "claimed_by": None,
+            "record_id": record_id,
         }
         await save_ticket_owners()
 
@@ -1138,6 +1752,13 @@ async def maybe_dm_ticket_owner(message: discord.Message) -> None:
         data["last_dm_time"] = now
         ticket_owners[str(message.channel.id)] = data
         await save_ticket_owners()
+        await append_ticket_record_event_for_channel(
+            message.channel,
+            data,
+            "owner_dm_sent",
+            f"Ticket owner was DMed because {message.author} replied.",
+            actor=message.author,
+        )
     except discord.HTTPException:
         pass
 
@@ -1177,500 +1798,14 @@ async def maybe_send_unavailable_ticket_reply(message: discord.Message) -> None:
     data["last_away_reply_time"] = now
     ticket_owners[channel_id] = data
     await save_ticket_owners()
+    await append_ticket_record_event_for_channel(
+        message.channel,
+        data,
+        "away_reply_sent",
+        "Unavailable auto-reply was sent in the ticket.",
+        actor=bot.user,
+    )
     asyncio.create_task(delete_message_later(away_msg, AWAY_AUTO_REPLY_DELETE_AFTER))
-
-
-
-# ============================================================
-# HIDDEN STAFF UI HELPERS
-# ============================================================
-def extract_user_id(value: str) -> int | None:
-    """Accepts a raw Discord ID or a mention like <@123> / <@!123>."""
-    match = re.search(r"\d{15,25}", value or "")
-    if not match:
-        return None
-    try:
-        return int(match.group(0))
-    except ValueError:
-        return None
-
-
-async def resolve_member_from_text(guild: discord.Guild, value: str) -> discord.Member | None:
-    user_id = extract_user_id(value)
-    if user_id is None:
-        return None
-
-    member = guild.get_member(user_id)
-    if member is not None:
-        return member
-
-    try:
-        return await guild.fetch_member(user_id)
-    except discord.HTTPException:
-        return None
-
-
-async def resolve_user_from_text(guild: discord.Guild, value: str) -> discord.User | discord.Member | None:
-    user_id = extract_user_id(value)
-    if user_id is None:
-        return None
-
-    member = guild.get_member(user_id)
-    if member is not None:
-        return member
-
-    try:
-        return await guild.fetch_member(user_id)
-    except discord.HTTPException:
-        pass
-
-    try:
-        return await bot.fetch_user(user_id)
-    except discord.HTTPException:
-        return None
-
-
-def is_tracked_ticket_channel(channel: discord.abc.GuildChannel | None) -> bool:
-    return isinstance(channel, discord.TextChannel) and isinstance(ticket_owners.get(str(channel.id)), dict)
-
-
-def get_ticket_data(channel: discord.abc.GuildChannel | None) -> dict[str, Any] | None:
-    if not isinstance(channel, discord.TextChannel):
-        return None
-    data = ticket_owners.get(str(channel.id))
-    return data if isinstance(data, dict) else None
-
-
-def can_use_hidden_ui(user: discord.abc.User, guild: discord.Guild | None) -> bool:
-    if guild is None or not isinstance(user, discord.Member):
-        return False
-    return is_staff_or_mod(user)
-
-
-async def add_member_to_ticket_channel(
-    channel: discord.TextChannel,
-    member: discord.Member,
-    actor: discord.Member | discord.User,
-) -> str:
-    data = get_ticket_data(channel)
-    if not isinstance(data, dict):
-        return "❌ This channel is not a tracked ticket."
-
-    try:
-        await channel.set_permissions(
-            member,
-            view_channel=True,
-            send_messages=True,
-            read_message_history=True,
-            attach_files=True,
-            reason=f"XSI UI: added to ticket by {actor} ({actor.id})",
-        )
-    except discord.Forbidden:
-        return "❌ I need Manage Channels permission to add users to tickets."
-    except discord.HTTPException:
-        return "❌ Discord rejected the permission update."
-
-    added_ids = data.setdefault("added_user_ids", [])
-    if member.id not in added_ids:
-        added_ids.append(member.id)
-    ticket_owners[str(channel.id)] = data
-    await save_ticket_owners()
-
-    await channel.send(
-        f"➕ {member.mention} was added to this ticket by {actor.mention}.",
-        allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-    )
-    return f"✅ Added {member.mention} to {channel.mention}."
-
-
-async def remove_member_from_ticket_channel(
-    channel: discord.TextChannel,
-    member: discord.Member,
-    actor: discord.Member | discord.User,
-) -> str:
-    data = get_ticket_data(channel)
-    if not isinstance(data, dict):
-        return "❌ This channel is not a tracked ticket."
-
-    owner_id = int(data.get("owner_id", 0))
-    if member.id == owner_id:
-        return "❌ You cannot remove the ticket owner from their own ticket. Close the ticket instead."
-
-    try:
-        await channel.set_permissions(
-            member,
-            overwrite=None,
-            reason=f"XSI UI: removed from ticket by {actor} ({actor.id})",
-        )
-    except discord.Forbidden:
-        return "❌ I need Manage Channels permission to remove users from tickets."
-    except discord.HTTPException:
-        return "❌ Discord rejected the permission update."
-
-    added_ids = data.setdefault("added_user_ids", [])
-    if member.id in added_ids:
-        added_ids.remove(member.id)
-    ticket_owners[str(channel.id)] = data
-    await save_ticket_owners()
-
-    await channel.send(
-        f"➖ {member.mention} was removed from this ticket by {actor.mention}.",
-        allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-    )
-    return f"✅ Removed {member.mention} from {channel.mention}."
-
-
-async def send_staff_dm(
-    guild: discord.Guild,
-    target: discord.User | discord.Member,
-    sender: discord.Member | discord.User,
-    message: str,
-) -> tuple[bool, str]:
-    body = (
-        f"📩 **Message from {guild.name} staff**\n"
-        f"Sent by: {getattr(sender, 'display_name', sender.name)}\n\n"
-        f"{message}"
-    )
-
-    try:
-        await target.send(body)
-    except discord.Forbidden:
-        return False, "❌ I could not DM that user. Their DMs may be closed."
-    except discord.HTTPException:
-        return False, "❌ Discord rejected the DM."
-
-    await send_staff_log(
-        guild,
-        f"📩 {sender.mention} sent a DM through XSI to {target.mention}: {message[:500]}",
-    )
-    return True, f"✅ DM sent to {target.mention}."
-
-
-def build_hidden_ui_embed(interaction: discord.Interaction) -> discord.Embed:
-    guild = interaction.guild
-    channel = interaction.channel
-    embed = discord.Embed(
-        title="🧰 XSI Hidden Staff UI",
-        description=(
-            "Private ticket control panel opened only for you.\n"
-            "This UI only shows ticket-related tools: claim, users, DMs, owner ping, rename, ticket info, and ticket-panel refresh."
-        ),
-        color=discord.Color.blurple(),
-    )
-    embed.add_field(name="Opened By", value=interaction.user.mention, inline=True)
-    embed.add_field(name="Server", value=guild.name if guild else "Unknown", inline=True)
-    embed.add_field(
-        name="Current Channel",
-        value=channel.mention if isinstance(channel, discord.TextChannel) else "Not a text channel",
-        inline=True,
-    )
-
-    data = get_ticket_data(channel)
-    if isinstance(data, dict):
-        owner_id = int(data.get("owner_id", 0))
-        claimed_by = data.get("claimed_by")
-        created_at = int(data.get("created_at", 0))
-        ticket_lines = [
-            f"Owner: <@{owner_id}>" if owner_id else "Owner: Unknown",
-            f"Claimed: <@{int(claimed_by)}>" if claimed_by else "Claimed: Not claimed",
-        ]
-        if created_at:
-            ticket_lines.append(f"Created: <t:{created_at}:R>")
-        embed.add_field(name="Ticket Context", value="\n".join(ticket_lines), inline=False)
-    else:
-        embed.add_field(name="Ticket Context", value="This is not a tracked ticket channel.", inline=False)
-
-    embed.set_footer(text="Use Hide UI when finished. This panel is ephemeral/private and only ticket related.")
-    return embed
-
-
-def build_ticket_info_embed(guild: discord.Guild, channel: discord.TextChannel) -> discord.Embed:
-    data = get_ticket_data(channel)
-    embed = discord.Embed(title="🎟️ Ticket Info", color=discord.Color.blue())
-    if not isinstance(data, dict):
-        embed.description = "This channel is not a tracked ticket."
-        return embed
-
-    owner_id = int(data.get("owner_id", 0))
-    claimed_by = data.get("claimed_by")
-    created_at = int(data.get("created_at", 0))
-    added_ids = data.get("added_user_ids", []) if isinstance(data.get("added_user_ids", []), list) else []
-
-    embed.add_field(name="Channel", value=channel.mention, inline=True)
-    embed.add_field(name="Owner", value=f"<@{owner_id}>" if owner_id else "Unknown", inline=True)
-    embed.add_field(name="Claimed By", value=f"<@{int(claimed_by)}>" if claimed_by else "Not claimed", inline=True)
-    embed.add_field(name="Auto Messages", value="Enabled" if data.get("auto_messages") else "Disabled", inline=True)
-    embed.add_field(name="Created", value=f"<t:{created_at}:f>\n<t:{created_at}:R>" if created_at else "Unknown", inline=True)
-    embed.add_field(
-        name="Added Users",
-        value=", ".join(f"<@{int(user_id)}>" for user_id in added_ids[:20]) if added_ids else "None tracked",
-        inline=False,
-    )
-
-    state = get_availability_state(guild.id)
-    embed.add_field(name="Availability", value=f"{state['title']} — {state['panel_line']}", inline=False)
-    return embed
-
-
-def build_active_giveaways_embed(guild: discord.Guild) -> discord.Embed:
-    embed = discord.Embed(title="🎉 Active Giveaways", color=discord.Color.gold())
-    lines: list[str] = []
-    for giveaway_id, data in active_giveaways.items():
-        if not isinstance(data, dict):
-            continue
-        if int(data.get("guild_id", 0)) != guild.id:
-            continue
-        channel_id = int(data.get("channel_id", 0))
-        message_id = int(data.get("message_id", 0))
-        ends_at = int(data.get("ends_at", 0))
-        prize = str(data.get("prize", "Unknown prize"))
-        channel = guild.get_channel(channel_id)
-        channel_text = channel.mention if isinstance(channel, discord.TextChannel) else f"Channel `{channel_id}`"
-        jump = f"https://discord.com/channels/{guild.id}/{channel_id}/{message_id}" if channel_id and message_id else ""
-        lines.append(f"• **{prize}** in {channel_text} — ends <t:{ends_at}:R>\n{jump}")
-
-    embed.description = "\n".join(lines[:10]) if lines else "No active giveaways in this server."
-    return embed
-
-
-class AddUserToTicketModal(discord.ui.Modal, title="Add User To Ticket"):
-    target = discord.ui.TextInput(
-        label="User mention or ID",
-        placeholder="Example: @user or 123456789012345678",
-        required=True,
-        max_length=100,
-    )
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
-            await interaction.response.send_message("❌ This only works inside a server ticket channel.", ephemeral=True)
-            return
-        if not can_use_hidden_ui(interaction.user, interaction.guild):
-            await interaction.response.send_message("❌ You do not have permission to use this UI.", ephemeral=True)
-            return
-
-        member = await resolve_member_from_text(interaction.guild, str(self.target.value))
-        if member is None:
-            await interaction.response.send_message("❌ I could not find that server member.", ephemeral=True)
-            return
-
-        result = await add_member_to_ticket_channel(interaction.channel, member, interaction.user)
-        await interaction.response.send_message(result, ephemeral=True)
-
-
-class RemoveUserFromTicketModal(discord.ui.Modal, title="Remove User From Ticket"):
-    target = discord.ui.TextInput(
-        label="User mention or ID",
-        placeholder="Example: @user or 123456789012345678",
-        required=True,
-        max_length=100,
-    )
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
-            await interaction.response.send_message("❌ This only works inside a server ticket channel.", ephemeral=True)
-            return
-        if not can_use_hidden_ui(interaction.user, interaction.guild):
-            await interaction.response.send_message("❌ You do not have permission to use this UI.", ephemeral=True)
-            return
-
-        member = await resolve_member_from_text(interaction.guild, str(self.target.value))
-        if member is None:
-            await interaction.response.send_message("❌ I could not find that server member.", ephemeral=True)
-            return
-
-        result = await remove_member_from_ticket_channel(interaction.channel, member, interaction.user)
-        await interaction.response.send_message(result, ephemeral=True)
-
-
-class DMUserModal(discord.ui.Modal, title="DM User Through XSI"):
-    target = discord.ui.TextInput(
-        label="User mention or ID",
-        placeholder="Example: @user or 123456789012345678",
-        required=True,
-        max_length=100,
-    )
-    dm_message = discord.ui.TextInput(
-        label="Message",
-        placeholder="Type the message to send to their DMs",
-        required=True,
-        style=discord.TextStyle.paragraph,
-        max_length=1800,
-    )
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
-            return
-        if not can_use_hidden_ui(interaction.user, interaction.guild):
-            await interaction.response.send_message("❌ You do not have permission to use this UI.", ephemeral=True)
-            return
-
-        target = await resolve_user_from_text(interaction.guild, str(self.target.value))
-        if target is None:
-            await interaction.response.send_message("❌ I could not find that user. Use a mention or raw Discord user ID.", ephemeral=True)
-            return
-
-        ok, result = await send_staff_dm(interaction.guild, target, interaction.user, str(self.dm_message.value))
-        await interaction.response.send_message(result, ephemeral=True)
-
-
-
-
-class RenameTicketModal(discord.ui.Modal, title="Rename Ticket"):
-    new_name = discord.ui.TextInput(
-        label="New ticket name",
-        placeholder="Example: trade-help-babloouvi",
-        required=True,
-        max_length=40,
-    )
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
-            await interaction.response.send_message("❌ This only works inside a server ticket channel.", ephemeral=True)
-            return
-        if not can_use_hidden_ui(interaction.user, interaction.guild):
-            await interaction.response.send_message("❌ You do not have permission to use this UI.", ephemeral=True)
-            return
-        if not is_tracked_ticket_channel(interaction.channel):
-            await interaction.response.send_message("❌ This is not a tracked ticket channel.", ephemeral=True)
-            return
-
-        cleaned = clean_channel_name(str(self.new_name.value))
-        if not cleaned.startswith("ticket-"):
-            cleaned = f"ticket-{cleaned}"
-
-        try:
-            old_name = interaction.channel.name
-            await interaction.channel.edit(
-                name=cleaned[:90],
-                reason=f"XSI UI: ticket renamed by {interaction.user} ({interaction.user.id})",
-            )
-        except discord.Forbidden:
-            await interaction.response.send_message("❌ I need Manage Channels permission to rename tickets.", ephemeral=True)
-            return
-        except discord.HTTPException:
-            await interaction.response.send_message("❌ Discord rejected the ticket rename.", ephemeral=True)
-            return
-
-        await interaction.channel.send(f"✏️ Ticket renamed from `#{old_name}` to `#{interaction.channel.name}` by {interaction.user.mention}.")
-        await interaction.response.send_message(f"✅ Ticket renamed to #{interaction.channel.name}.", ephemeral=True)
-
-class XSIHiddenUIView(discord.ui.View):
-    def __init__(self) -> None:
-        super().__init__(timeout=10 * 60)
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if can_use_hidden_ui(interaction.user, interaction.guild):
-            return True
-        await interaction.response.send_message("❌ You do not have permission to use this UI.", ephemeral=True)
-        return False
-
-    @discord.ui.button(label="Claim", emoji="✅", style=discord.ButtonStyle.green, row=0)
-    async def claim_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if not isinstance(interaction.channel, discord.TextChannel):
-            await interaction.response.send_message("❌ This only works inside a ticket channel.", ephemeral=True)
-            return
-        data = get_ticket_data(interaction.channel)
-        if not isinstance(data, dict):
-            await interaction.response.send_message("❌ This is not a tracked ticket.", ephemeral=True)
-            return
-        data["claimed_by"] = interaction.user.id
-        ticket_owners[str(interaction.channel.id)] = data
-        await save_ticket_owners()
-        await interaction.channel.send(f"✅ Ticket claimed by {interaction.user.mention}.")
-        await interaction.response.send_message("✅ Ticket claimed.", ephemeral=True)
-
-    @discord.ui.button(label="Unclaim", emoji="↩️", style=discord.ButtonStyle.secondary, row=0)
-    async def unclaim_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if not isinstance(interaction.channel, discord.TextChannel):
-            await interaction.response.send_message("❌ This only works inside a ticket channel.", ephemeral=True)
-            return
-        data = get_ticket_data(interaction.channel)
-        if not isinstance(data, dict):
-            await interaction.response.send_message("❌ This is not a tracked ticket.", ephemeral=True)
-            return
-        data["claimed_by"] = None
-        ticket_owners[str(interaction.channel.id)] = data
-        await save_ticket_owners()
-        await interaction.channel.send(f"↩️ Ticket unclaimed by {interaction.user.mention}.")
-        await interaction.response.send_message("✅ Ticket unclaimed.", ephemeral=True)
-
-    @discord.ui.button(label="Ticket Info", emoji="📌", style=discord.ButtonStyle.secondary, row=0)
-    async def ticket_info_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
-            await interaction.response.send_message("❌ This only works inside a server text channel.", ephemeral=True)
-            return
-        await interaction.response.send_message(embed=build_ticket_info_embed(interaction.guild, interaction.channel), ephemeral=True)
-
-    @discord.ui.button(label="Add User", emoji="➕", style=discord.ButtonStyle.primary, row=1)
-    async def add_user_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.send_modal(AddUserToTicketModal())
-
-    @discord.ui.button(label="Remove User", emoji="➖", style=discord.ButtonStyle.secondary, row=1)
-    async def remove_user_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.send_modal(RemoveUserFromTicketModal())
-
-    @discord.ui.button(label="DM User", emoji="📩", style=discord.ButtonStyle.primary, row=1)
-    async def dm_user_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.send_modal(DMUserModal())
-
-    @discord.ui.button(label="DM Owner", emoji="🔔", style=discord.ButtonStyle.secondary, row=2)
-    async def dm_owner_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
-            await interaction.response.send_message("❌ This only works inside a ticket channel.", ephemeral=True)
-            return
-        data = get_ticket_data(interaction.channel)
-        if not isinstance(data, dict):
-            await interaction.response.send_message("❌ This is not a tracked ticket.", ephemeral=True)
-            return
-        owner_id = int(data.get("owner_id", 0))
-        if not owner_id:
-            await interaction.response.send_message("❌ This ticket has no tracked owner.", ephemeral=True)
-            return
-        try:
-            owner = interaction.guild.get_member(owner_id) or await interaction.guild.fetch_member(owner_id)
-        except discord.HTTPException:
-            await interaction.response.send_message("❌ I could not find the ticket owner.", ephemeral=True)
-            return
-        ok, result = await send_staff_dm(
-            interaction.guild,
-            owner,
-            interaction.user,
-            f"Your ticket has been updated. Please check {interaction.channel.mention} when you can.",
-        )
-        await interaction.response.send_message(result, ephemeral=True)
-
-    @discord.ui.button(label="Rename Ticket", emoji="✏️", style=discord.ButtonStyle.secondary, row=2)
-    async def rename_ticket_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.send_modal(RenameTicketModal())
-
-    @discord.ui.button(label="Availability", emoji="⏰", style=discord.ButtonStyle.secondary, row=2)
-    async def availability_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if interaction.guild is None:
-            await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
-            return
-        state = get_availability_state(interaction.guild.id)
-        await interaction.response.send_message(
-            f"⏰ **{state['title']}** — {state['panel_line']}\n{state['message']}",
-            ephemeral=True,
-        )
-
-    @discord.ui.button(label="Refresh Panel", emoji="🔄", style=discord.ButtonStyle.secondary, row=3)
-    async def refresh_panel_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if interaction.guild is None:
-            await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        message = await send_or_update_ticket_panel(interaction.guild)
-        await interaction.followup.send(
-            "✅ Ticket panel refreshed." if message else "❌ Ticket panel channel is not set. Run `/setup` or `/tickets`.",
-            ephemeral=True,
-        )
-
-    @discord.ui.button(label="Hide UI", emoji="🙈", style=discord.ButtonStyle.danger, row=3)
-    async def hide_ui_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.edit_message(content="🙈 XSI hidden UI closed.", embed=None, view=None)
 
 
 # ============================================================
@@ -1706,15 +1841,88 @@ class CloseButton(discord.ui.View):
             await interaction.response.send_message("❌ Only the ticket owner or staff can close this ticket.", ephemeral=True)
             return
 
+        await mark_ticket_record_closed(interaction.channel, data, interaction.user)
         ticket_owners.pop(channel_id, None)
         await save_ticket_owners()
-        await interaction.response.send_message("Closing ticket...", ephemeral=True)
+        await interaction.response.send_message("Closing ticket and saving record...", ephemeral=True)
         await asyncio.sleep(2)
 
         try:
             await interaction.channel.delete(reason=f"Ticket closed by {interaction.user} ({interaction.user.id})")
         except discord.HTTPException as exc:
             log.warning("Failed to delete ticket channel %s: %s", interaction.channel.id, exc)
+
+
+class RecordCloseButton(discord.ui.View):
+    def __init__(self) -> None:
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Close Record", style=discord.ButtonStyle.red, custom_id="xsi_close_record_channel")
+    async def close_record(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
+            await interaction.response.send_message("❌ This button only works inside a record channel.", ephemeral=True)
+            return
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+            return
+        if not interaction.channel.name.startswith("record-"):
+            await interaction.response.send_message("❌ This does not look like an XSI record channel.", ephemeral=True)
+            return
+        if not is_staff_or_mod(interaction.user):
+            await interaction.response.send_message("❌ Only staff can close record channels.", ephemeral=True)
+            return
+        await interaction.response.send_message("🧹 Deleting this record channel...", ephemeral=True)
+        await asyncio.sleep(2)
+        try:
+            await interaction.channel.delete(reason=f"XSI record channel closed by {interaction.user} ({interaction.user.id})")
+        except discord.HTTPException:
+            pass
+
+
+class RecordTicketSelect(discord.ui.Select):
+    def __init__(self, records: list[dict[str, Any]]) -> None:
+        options: list[discord.SelectOption] = []
+        for record in records[:MAX_RECORD_SELECT_OPTIONS]:
+            record_id = str(record.get("record_id") or "unknown")
+            channel_name = str(record.get("channel_name") or "ticket")
+            status = str(record.get("status") or "unknown").title()
+            msg_count = len(record.get("messages") or [])
+            label = f"#{record_id} {channel_name}"[:100]
+            description = f"{status} • {_record_short_time(record.get('created_at'))} • {msg_count} messages"[:100]
+            options.append(discord.SelectOption(label=label, description=description, value=record_id))
+        if not options:
+            options.append(discord.SelectOption(label="No records found", value="none", description="No ticket records are available"))
+        super().__init__(placeholder="Pick a ticket record to open...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        parent = self.view
+        if not isinstance(parent, RecordPickerView):
+            await interaction.response.send_message("❌ This menu expired. Run `/record` again.", ephemeral=True)
+            return
+        if interaction.user.id != parent.requester_id:
+            await interaction.response.send_message("❌ This record menu was not opened for you.", ephemeral=True)
+            return
+        record_id = self.values[0]
+        if record_id == "none" or interaction.guild is None:
+            await interaction.response.send_message("❌ No record selected.", ephemeral=True)
+            return
+        record = _record_copy(interaction.guild.id, record_id)
+        if record is None:
+            await interaction.response.send_message("❌ That record could not be found anymore.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        channel = await create_record_review_channel(interaction.guild, interaction.user, record)
+        if channel is None:
+            await interaction.followup.send("❌ I could not create the record channel. Check Manage Channels permissions.", ephemeral=True)
+            return
+        await interaction.followup.send(f"✅ Record opened: {channel.mention}", ephemeral=True)
+
+
+class RecordPickerView(discord.ui.View):
+    def __init__(self, requester_id: int, records: list[dict[str, Any]]) -> None:
+        super().__init__(timeout=180)
+        self.requester_id = requester_id
+        self.add_item(RecordTicketSelect(records))
 
 
 class TicketsButton(discord.ui.View):
@@ -2255,6 +2463,7 @@ async def on_message(message: discord.Message) -> None:
     if message.guild is None or not isinstance(message.author, discord.Member):
         return
 
+    await append_ticket_record_message(message)
     await maybe_dm_ticket_owner(message)
     await maybe_send_unavailable_ticket_reply(message)
     await maybe_handle_smart_message(message)
@@ -2311,7 +2520,7 @@ async def version_cmd(ctx: commands.Context) -> None:
 @bot.command(name="buildcheck", aliases=["commandcount", "slashcount"])
 async def buildcheck_cmd(ctx: commands.Context) -> None:
     names = sorted(command.name for command in bot.tree.get_commands())
-    critical = ["clearsetup", "setunavailable", "refreshticketpanel", "setavailability", "availability", "clearunavailable", "ui", "dm", "kick"]
+    critical = ["clearsetup", "setunavailable", "refreshticketpanel", "setavailability", "availability", "clearunavailable", "record", "setrecordcategory"]
     missing = [name for name in critical if name not in names]
     missing_text = ", ".join(missing) if missing else "None"
     await ctx.send(
@@ -2645,6 +2854,7 @@ async def claim_ticket(ctx: commands.Context) -> None:
         return
     data["claimed_by"] = ctx.author.id
     await save_ticket_owners()
+    await append_ticket_record_event_for_channel(ctx.channel, data, "ticket_claimed", f"Ticket claimed by {ctx.author}.", actor=ctx.author)
     await ctx.send(f"✅ Ticket claimed by {ctx.author.mention}.")
 
 
@@ -2660,24 +2870,60 @@ async def unclaim_ticket(ctx: commands.Context) -> None:
         return
     data["claimed_by"] = None
     await save_ticket_owners()
+    await append_ticket_record_event_for_channel(ctx.channel, data, "ticket_unclaimed", f"Ticket unclaimed by {ctx.author}.", actor=ctx.author)
     await ctx.send("✅ Ticket unclaimed.")
+
+
+@bot.command(name="setrecordcategory")
+@commands.has_permissions(manage_channels=True)
+async def setrecordcategory_prefix(ctx: commands.Context, category_id: int | None = None) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    if category_id is None:
+        if not isinstance(ctx.channel, discord.TextChannel) or ctx.channel.category is None:
+            await ctx.send("❌ Use this inside a category channel, or run `!setrecordcategory CATEGORY_ID`.")
+            return
+        category = ctx.channel.category
+    else:
+        category = ctx.guild.get_channel(category_id)
+    if not isinstance(category, discord.CategoryChannel):
+        await ctx.send("❌ That ID is not a valid category in this server.")
+        return
+    config = guild_config(ctx.guild.id)
+    config["record_category_id"] = category.id
+    await save_server_settings()
+    await ctx.send(f"✅ Record category set to **{category.name}**. Record channels will be created there.")
+
+
+@bot.command(name="record", aliases=["ticketrecord", "records"])
+@commands.has_permissions(manage_messages=True)
+async def record_prefix(ctx: commands.Context, member: discord.Member) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    await ensure_active_records_for_member(ctx.guild, member)
+    records = find_ticket_records_for_member(ctx.guild.id, member.id)
+    if not records:
+        await ctx.send(f"❌ No ticket records found for {member.mention}. Records are saved for tickets created or active after this update.")
+        return
+    view = RecordPickerView(ctx.author.id, records[:MAX_RECORD_SELECT_OPTIONS])
+    extra = "" if len(records) <= MAX_RECORD_SELECT_OPTIONS else f"\nShowing newest {MAX_RECORD_SELECT_OPTIONS} records only."
+    await ctx.send(f"📁 Pick which ticket record you want to open for {member.mention}.{extra}", view=view)
 
 
 # ============================================================
 # PREFIX COMMANDS - MODERATION
 # ============================================================
-
-@bot.command(name="kick")
+@bot.command(name="kick", aliases=["xsikick", "xkick", "xsi-kick", "xsi_kick"])
 @commands.has_permissions(kick_members=True)
-async def prefix_kick(ctx: commands.Context, member: discord.Member, *, reason: str = "No reason provided") -> None:
+async def xsikick_prefix(ctx: commands.Context, member: discord.Member, *, reason: str = "No reason provided.") -> None:
     if ctx.guild is None:
         await ctx.send("❌ This command only works inside a server.")
         return
-    ok, result = await kick_member_with_checks(ctx.guild, ctx.author, member, reason)
-    await ctx.send(
-        result,
-        allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-    )
+    test_mode, clean_reason = parse_xsikick_reason(reason)
+    _, message = await run_xsikick(ctx.guild, member, ctx.author, clean_reason, test_mode=test_mode)
+    await ctx.send(message, allowed_mentions=discord.AllowedMentions.none())
 
 
 @bot.command(name="warn")
@@ -2892,7 +3138,7 @@ async def slash_version(interaction: discord.Interaction) -> None:
 @bot.tree.command(name="buildcheck", description="Show XSI build and slash-command diagnostics")
 async def slash_buildcheck(interaction: discord.Interaction) -> None:
     names = sorted(command.name for command in bot.tree.get_commands())
-    critical = ["clearsetup", "setunavailable", "refreshticketpanel", "setavailability", "availability", "clearunavailable", "ui", "dm", "kick"]
+    critical = ["clearsetup", "setunavailable", "refreshticketpanel", "setavailability", "availability", "clearunavailable", "record", "setrecordcategory"]
     missing = [name for name in critical if name not in names]
     missing_text = ", ".join(missing) if missing else "None"
     await interaction.response.send_message(
@@ -2902,34 +3148,6 @@ async def slash_buildcheck(interaction: discord.Interaction) -> None:
         f"Critical commands missing: `{missing_text}`",
         ephemeral=True,
     )
-
-
-@bot.tree.command(name="ui", description="Open the hidden XSI ticket staff UI")
-async def slash_ui(interaction: discord.Interaction) -> None:
-    if interaction.guild is None:
-        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
-        return
-    if not can_use_hidden_ui(interaction.user, interaction.guild):
-        await interaction.response.send_message("❌ You do not have permission to use the hidden staff UI.", ephemeral=True)
-        return
-    await interaction.response.send_message(
-        embed=build_hidden_ui_embed(interaction),
-        view=XSIHiddenUIView(),
-        ephemeral=True,
-    )
-
-
-@bot.tree.command(name="dm", description="Send a private DM to a user through XSI")
-@app_commands.describe(member="The server member to DM", message="The message to send to their DMs")
-async def slash_dm(interaction: discord.Interaction, member: discord.Member, message: str) -> None:
-    if interaction.guild is None:
-        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
-        return
-    if not can_use_hidden_ui(interaction.user, interaction.guild):
-        await interaction.response.send_message("❌ You do not have permission to send DMs through XSI.", ephemeral=True)
-        return
-    ok, result = await send_staff_dm(interaction.guild, member, interaction.user, message)
-    await interaction.response.send_message(result, ephemeral=True)
 
 
 @bot.tree.command(name="synccommands", description="Sync XSI slash commands in this server")
@@ -3290,6 +3508,7 @@ async def slash_claim(interaction: discord.Interaction) -> None:
         return
     data["claimed_by"] = interaction.user.id
     await save_ticket_owners()
+    await append_ticket_record_event_for_channel(interaction.channel, data, "ticket_claimed", f"Ticket claimed by {interaction.user}.", actor=interaction.user)
     await interaction.response.send_message(f"✅ Ticket claimed by {interaction.user.mention}.")
 
 
@@ -3305,28 +3524,50 @@ async def slash_unclaim(interaction: discord.Interaction) -> None:
         return
     data["claimed_by"] = None
     await save_ticket_owners()
+    await append_ticket_record_event_for_channel(interaction.channel, data, "ticket_unclaimed", f"Ticket unclaimed by {interaction.user}.", actor=interaction.user)
     await interaction.response.send_message("✅ Ticket unclaimed.")
 
 
+@bot.tree.command(name="setrecordcategory", description="Set the optional category for temporary /record channels")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def slash_setrecordcategory(interaction: discord.Interaction, category: discord.CategoryChannel) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    config = guild_config(interaction.guild.id)
+    config["record_category_id"] = category.id
+    await save_server_settings()
+    await interaction.response.send_message(
+        f"✅ Record category set to **{category.name}**. `/record` channels will be created there.",
+        ephemeral=True,
+    )
 
-@bot.tree.command(name="kick", description="Kick a member from this server")
-@app_commands.describe(member="The member to kick", reason="The reason for the kick")
+
+@bot.tree.command(name="record", description="Open a temporary record channel for a member's previous ticket")
+@app_commands.describe(member="Member whose ticket records you want to view")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_record(interaction: discord.Interaction, member: discord.Member) -> None:
+    await send_record_picker_response(interaction, member)
+
+
+@bot.tree.command(name="kick", description="Kick a member through XSI, or test without kicking")
+@app_commands.describe(
+    member="The member to kick",
+    reason="Reason for the kick",
+    test_mode="Turn this on to test without kicking the member",
+)
 @app_commands.checks.has_permissions(kick_members=True)
-async def slash_kick(
+async def slash_xsikick(
     interaction: discord.Interaction,
     member: discord.Member,
-    reason: str = "No reason provided",
+    reason: str = "No reason provided.",
+    test_mode: bool = False,
 ) -> None:
     if interaction.guild is None:
         await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
         return
-    await interaction.response.defer(ephemeral=True, thinking=True)
-    ok, result = await kick_member_with_checks(interaction.guild, interaction.user, member, reason)
-    await interaction.followup.send(
-        result,
-        ephemeral=True,
-        allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-    )
+    _, message = await run_xsikick(interaction.guild, member, interaction.user, reason, test_mode=test_mode)
+    await interaction.response.send_message(message, allowed_mentions=discord.AllowedMentions.none())
 
 
 @bot.tree.command(name="warn", description="Manually warn a member")
@@ -3536,7 +3777,7 @@ def build_required_permissions_embed(guild: discord.Guild) -> discord.Embed:
         ("Manage Messages", perms.manage_messages, "delete banned messages and clean commands"),
         ("Embed Links", perms.embed_links, "send ticket, setup, warning, and log embeds"),
         ("Add Reactions", perms.add_reactions, "add the giveaway reaction"),
-        ("Kick Members", perms.kick_members, "kick users after max warnings and use manual /kick"),
+        ("Kick Members", perms.kick_members, "kick users after max warnings"),
         ("Ban Members", perms.ban_members, "only needed if punishment mode is ban"),
     ]
     optional = [
@@ -3617,8 +3858,9 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
             "`!clearsetup delete_created YES`\n"
             "`!setunavailable 3pm 6pm I am unavailable right now.`\n"
             "`!refreshticketpanel`\n"
-            "`!warn @user reason`\n"
-            "`!kick @user reason`"
+            "`!kick @user reason`\n"
+            "`!kick @user --test reason`\n"
+            "`!warn @user reason`"
         )
         return
     if isinstance(error, commands.BadArgument):
