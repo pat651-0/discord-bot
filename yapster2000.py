@@ -25,8 +25,8 @@ from discord.ext import commands, tasks
 # python xsi_bot_full_setup_requiredpermissions.py
 # ============================================================
 
-VERSION = "XSI full setup build 2026-06-16 / records-kick-testmode"
-BUILD_TAG = "XSI-FORCE-45-RECORDS-KICK-TESTMODE"
+VERSION = "XSI full setup build 2026-06-16 / records-channel-kick-testmode"
+BUILD_TAG = "XSI-FORCE-46-RECORDCHANNEL-RECORDS-KICK-TESTMODE"
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
@@ -345,6 +345,7 @@ def default_guild_config() -> dict[str, Any]:
         "guilt_channel_id": None,
         "transcript_channel_id": None,
         "record_category_id": None,
+        "record_channel_id": None,
         "staff_log_channel_id": None,
         "rules_channel_id": None,
         "giveaways_channel_id": None,
@@ -1432,6 +1433,15 @@ def get_record_category(guild: discord.Guild) -> discord.CategoryChannel | None:
     return category if isinstance(category, discord.CategoryChannel) else None
 
 
+def get_record_channel(guild: discord.Guild) -> discord.TextChannel | None:
+    config = guild_config(guild.id)
+    channel_id = config.get("record_channel_id")
+    if not channel_id:
+        return None
+    channel = guild.get_channel(_safe_int(channel_id, 0))
+    return channel if isinstance(channel, discord.TextChannel) else None
+
+
 async def delete_record_channel_later(guild_id: int, channel_id: int, seconds: int = RECORD_CHANNEL_DELETE_AFTER) -> None:
     await asyncio.sleep(seconds)
     guild = bot.get_guild(guild_id)
@@ -1491,6 +1501,17 @@ async def create_record_review_channel(
         )
     except discord.HTTPException:
         return None
+
+    record_log_channel = get_record_channel(guild)
+    if record_log_channel is not None and record_log_channel.id != channel.id:
+        owner_for_log = f"<@{record.get('owner_id')}>" if _safe_int(record.get("owner_id"), 0) else str(record.get("owner_name") or "Unknown")
+        try:
+            await record_log_channel.send(
+                f"📁 Ticket record opened by {requester.mention} for {owner_for_log}: {channel.mention}",
+                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+            )
+        except discord.HTTPException:
+            pass
 
     owner_text = f"<@{record.get('owner_id')}>" if _safe_int(record.get("owner_id"), 0) else str(record.get("owner_name") or "Unknown")
     transcript = build_ticket_record_transcript(record)
@@ -1872,6 +1893,15 @@ class RecordCloseButton(discord.ui.View):
             await interaction.response.send_message("❌ Only staff can close record channels.", ephemeral=True)
             return
         await interaction.response.send_message("🧹 Deleting this record channel...", ephemeral=True)
+        record_log_channel = get_record_channel(interaction.guild)
+        if record_log_channel is not None and record_log_channel.id != interaction.channel.id:
+            try:
+                await record_log_channel.send(
+                    f"🧹 Ticket record channel closed by {interaction.user.mention}: `#{interaction.channel.name}`",
+                    allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+                )
+            except discord.HTTPException:
+                pass
         await asyncio.sleep(2)
         try:
             await interaction.channel.delete(reason=f"XSI record channel closed by {interaction.user} ({interaction.user.id})")
@@ -2520,7 +2550,7 @@ async def version_cmd(ctx: commands.Context) -> None:
 @bot.command(name="buildcheck", aliases=["commandcount", "slashcount"])
 async def buildcheck_cmd(ctx: commands.Context) -> None:
     names = sorted(command.name for command in bot.tree.get_commands())
-    critical = ["clearsetup", "setunavailable", "refreshticketpanel", "setavailability", "availability", "clearunavailable", "record", "setrecordcategory"]
+    critical = ["clearsetup", "setunavailable", "refreshticketpanel", "setavailability", "availability", "clearunavailable", "record", "setrecordcategory", "setrecordchannel"]
     missing = [name for name in critical if name not in names]
     missing_text = ", ".join(missing) if missing else "None"
     await ctx.send(
@@ -2591,6 +2621,7 @@ async def checksetup(ctx: commands.Context) -> None:
                 ch_line("Wall", "wall_channel_id"),
                 ch_line("Leaves", "leaves_channel_id"),
                 ch_line("Transcripts", "transcript_channel_id"),
+                ch_line("Record Channel", "record_channel_id"),
                 ch_line("Staff Logs", "staff_log_channel_id"),
                 ch_line("Rules", "rules_channel_id"),
                 ch_line("Giveaways", "giveaways_channel_id"),
@@ -2896,6 +2927,19 @@ async def setrecordcategory_prefix(ctx: commands.Context, category_id: int | Non
     await ctx.send(f"✅ Record category set to **{category.name}**. Record channels will be created there.")
 
 
+@bot.command(name="setrecordchannel", aliases=["recordchannel", "setrecordlogchannel"])
+@commands.has_permissions(manage_channels=True)
+async def setrecordchannel_prefix(ctx: commands.Context, channel: discord.TextChannel | None = None) -> None:
+    if ctx.guild is None or not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("❌ This command only works inside a server text channel.")
+        return
+    target = channel or ctx.channel
+    config = guild_config(ctx.guild.id)
+    config["record_channel_id"] = target.id
+    await save_server_settings()
+    await ctx.send(f"✅ Record channel set to {target.mention}. Record open/close notices will be posted there.")
+
+
 @bot.command(name="record", aliases=["ticketrecord", "records"])
 @commands.has_permissions(manage_messages=True)
 async def record_prefix(ctx: commands.Context, member: discord.Member) -> None:
@@ -3138,7 +3182,7 @@ async def slash_version(interaction: discord.Interaction) -> None:
 @bot.tree.command(name="buildcheck", description="Show XSI build and slash-command diagnostics")
 async def slash_buildcheck(interaction: discord.Interaction) -> None:
     names = sorted(command.name for command in bot.tree.get_commands())
-    critical = ["clearsetup", "setunavailable", "refreshticketpanel", "setavailability", "availability", "clearunavailable", "record", "setrecordcategory"]
+    critical = ["clearsetup", "setunavailable", "refreshticketpanel", "setavailability", "availability", "clearunavailable", "record", "setrecordcategory", "setrecordchannel"]
     missing = [name for name in critical if name not in names]
     missing_text = ", ".join(missing) if missing else "None"
     await interaction.response.send_message(
@@ -3216,6 +3260,7 @@ async def slash_checksetup(interaction: discord.Interaction) -> None:
                 ch_line("Wall", "wall_channel_id"),
                 ch_line("Leaves", "leaves_channel_id"),
                 ch_line("Transcripts", "transcript_channel_id"),
+                ch_line("Record Channel", "record_channel_id"),
                 ch_line("Staff Logs", "staff_log_channel_id"),
                 ch_line("Rules", "rules_channel_id"),
                 ch_line("Giveaways", "giveaways_channel_id"),
@@ -3539,6 +3584,22 @@ async def slash_setrecordcategory(interaction: discord.Interaction, category: di
     await save_server_settings()
     await interaction.response.send_message(
         f"✅ Record category set to **{category.name}**. `/record` channels will be created there.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="setrecordchannel", description="Set the channel for XSI ticket-record notices")
+@app_commands.describe(channel="Channel where XSI should post record-open notices")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def slash_setrecordchannel(interaction: discord.Interaction, channel: discord.TextChannel) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    config = guild_config(interaction.guild.id)
+    config["record_channel_id"] = channel.id
+    await save_server_settings()
+    await interaction.response.send_message(
+        f"✅ Record channel set to {channel.mention}. Record open/close notices will be posted there.",
         ephemeral=True,
     )
 
