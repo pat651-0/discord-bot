@@ -25,8 +25,8 @@ from discord.ext import commands, tasks
 # python xsi_bot_full_setup_requiredpermissions.py
 # ============================================================
 
-VERSION = "XSI full setup build 2026-06-16 / records-channel-kick-testmode"
-BUILD_TAG = "XSI-FORCE-46-RECORDCHANNEL-RECORDS-KICK-TESTMODE"
+VERSION = "XSI full setup build 2026-06-21 / giveaway-duration-controls-ticketusers"
+BUILD_TAG = "XSI-FORCE-48-GIVEAWAY-DURATION-CONTROLS-TICKETUSERS"
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
@@ -72,6 +72,9 @@ AWAY_AUTO_REPLY_COOLDOWN = 60 * 60
 AWAY_AUTO_REPLY_DELETE_AFTER = 5 * 60
 GIVEAWAY_TIME = 24 * 60 * 60
 TEST_GIVEAWAY_TIME = 30
+MAX_GIVEAWAY_WINNERS = 25
+MIN_GIVEAWAY_SECONDS = 10
+MAX_GIVEAWAY_SECONDS = 30 * 24 * 60 * 60
 RECORD_CHANNEL_DELETE_AFTER = 60 * 60
 MAX_RECORD_SELECT_OPTIONS = 25
 MAX_RECORD_PREVIEW_CHUNKS = 20
@@ -2301,6 +2304,12 @@ async def maybe_handle_smart_message(message: discord.Message) -> bool:
 # ============================================================
 # GIVEAWAYS
 # ============================================================
+DURATION_PATTERN = re.compile(
+    r"^(?P<amount>\d+)\s*(?P<unit>s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$",
+    flags=re.IGNORECASE,
+)
+
+
 def make_prize(amount: int, prize_type: str) -> str | None:
     prize_type = prize_type.lower().strip()
     if prize_type == "normal":
@@ -2321,69 +2330,666 @@ def make_prize(amount: int, prize_type: str) -> str | None:
     return None
 
 
-async def finish_giveaway_by_data(data: dict[str, Any]) -> None:
+def parse_duration_to_seconds(raw_duration: str | None, default_seconds: int = GIVEAWAY_TIME) -> int:
+    if raw_duration is None:
+        return default_seconds
+
+    text = str(raw_duration).strip().lower()
+    if not text:
+        return default_seconds
+
+    text = text.replace("duration:", "").replace("time:", "").strip()
+    text = re.sub(r"\s+", " ", text)
+    match = DURATION_PATTERN.fullmatch(text)
+    if not match:
+        raise ValueError("Use a duration like 30s, 10m, 2h, or 1d.")
+
+    amount = int(match.group("amount"))
+    unit = match.group("unit").lower()
+    if unit.startswith("s"):
+        seconds = amount
+    elif unit.startswith("m"):
+        seconds = amount * 60
+    elif unit.startswith("h"):
+        seconds = amount * 60 * 60
+    else:
+        seconds = amount * 24 * 60 * 60
+
+    if seconds < MIN_GIVEAWAY_SECONDS:
+        raise ValueError(f"Giveaway duration must be at least {MIN_GIVEAWAY_SECONDS} seconds.")
+    if seconds > MAX_GIVEAWAY_SECONDS:
+        raise ValueError("Giveaway duration cannot be more than 30 days.")
+    return seconds
+
+
+def format_duration(seconds: int) -> str:
+    if seconds % (24 * 60 * 60) == 0:
+        amount = seconds // (24 * 60 * 60)
+        return f"{amount} day" + ("" if amount == 1 else "s")
+    if seconds % (60 * 60) == 0:
+        amount = seconds // (60 * 60)
+        return f"{amount} hour" + ("" if amount == 1 else "s")
+    if seconds % 60 == 0:
+        amount = seconds // 60
+        return f"{amount} minute" + ("" if amount == 1 else "s")
+    return f"{seconds} second" + ("" if seconds == 1 else "s")
+
+
+def _try_parse_duration_token(parts: list[str]) -> tuple[int | None, list[str]]:
+    """Pull a duration token out of prefix giveaway text.
+
+    Supported examples:
+    - 2h
+    - duration:2h
+    - 2 hours
+    """
+    if not parts:
+        return None, parts
+
+    clean_parts = parts[:]
+
+    # duration:2h or time:30m can appear anywhere.
+    for index, token in enumerate(clean_parts):
+        lowered = token.lower().strip()
+        if lowered.startswith("duration:") or lowered.startswith("time:"):
+            seconds = parse_duration_to_seconds(lowered)
+            return seconds, clean_parts[:index] + clean_parts[index + 1 :]
+
+    # End token: 2h / 30m / 1d.
+    if DURATION_PATTERN.fullmatch(clean_parts[-1].lower()):
+        seconds = parse_duration_to_seconds(clean_parts[-1])
+        return seconds, clean_parts[:-1]
+
+    # End pair: 2 hours / 30 minutes.
+    if len(clean_parts) >= 2 and clean_parts[-2].isdigit():
+        pair = f"{clean_parts[-2]} {clean_parts[-1]}"
+        if DURATION_PATTERN.fullmatch(pair.lower()):
+            seconds = parse_duration_to_seconds(pair)
+            return seconds, clean_parts[:-2]
+
+    return None, clean_parts
+
+
+def parse_giveaway_options(raw_prize_text: str, default_seconds: int = GIVEAWAY_TIME) -> tuple[int, str, int, str]:
+    """Allow old and new prefix formats.
+
+    Old format still works:
+    !giveaway 1 normal
+
+    Winner amount examples:
+    !giveaway 1 3 normal
+    !giveaway 1 normal 3
+
+    Duration examples:
+    !giveaway 1 normal 2h
+    !giveaway 1 normal 3 2h
+    !giveaway 1 3 normal duration:2h
+    """
+    text = raw_prize_text.strip()
+    parts = text.split()
+    parsed_seconds, parts = _try_parse_duration_token(parts)
+    duration_seconds = parsed_seconds if parsed_seconds is not None else default_seconds
+
+    winner_amount = 1
+    if len(parts) >= 2 and parts[0].isdigit():
+        winner_amount = int(parts[0])
+        parts = parts[1:]
+    elif len(parts) >= 2 and parts[-1].isdigit():
+        winner_amount = int(parts[-1])
+        parts = parts[:-1]
+
+    prize_type = " ".join(parts).strip()
+    return winner_amount, prize_type, duration_seconds, format_duration(duration_seconds)
+
+
+# Kept for compatibility with older code/imports that might call this directly.
+def parse_giveaway_prize_and_winners(raw_prize_text: str) -> tuple[int, str]:
+    winner_amount, clean_prize_type, _, _ = parse_giveaway_options(raw_prize_text, GIVEAWAY_TIME)
+    return winner_amount, clean_prize_type
+
+
+def validate_giveaway_numbers(amount: int, winner_amount: int) -> str | None:
+    if amount <= 0:
+        return "❌ Amount must be at least 1."
+    if winner_amount <= 0:
+        return "❌ Winner amount must be at least 1."
+    if winner_amount > MAX_GIVEAWAY_WINNERS:
+        return f"❌ Winner amount cannot be more than {MAX_GIVEAWAY_WINNERS}."
+    return None
+
+
+def giveaway_winner_word(winner_amount: int) -> str:
+    return "winner" if winner_amount == 1 else "winners"
+
+
+def format_giveaway_winners(winners: list[discord.User | discord.Member]) -> str:
+    if len(winners) == 1:
+        return f"Winner: {winners[0].mention}"
+    return "Winners:\n" + "\n".join(f"{index}. {winner.mention}" for index, winner in enumerate(winners, start=1))
+
+
+def format_stored_winner_ids(winner_ids: list[Any]) -> str:
+    clean_ids = [_safe_int(user_id, 0) for user_id in winner_ids]
+    clean_ids = [user_id for user_id in clean_ids if user_id > 0]
+    if not clean_ids:
+        return "No winners stored."
+    if len(clean_ids) == 1:
+        return f"Winner: <@{clean_ids[0]}>"
+    return "Winners:\n" + "\n".join(f"{index}. <@{user_id}>" for index, user_id in enumerate(clean_ids, start=1))
+
+
+def prize_from_giveaway_message(message: discord.Message) -> str:
+    for embed in message.embeds:
+        description = embed.description or ""
+        match = re.search(r"^Prize:\s*(.+)$", description, flags=re.MULTILINE)
+        if match:
+            return match.group(1).strip().strip("*")
+        for field in embed.fields:
+            if field.name.lower().strip("*: ") == "prize":
+                return str(field.value).strip()
+    return "this giveaway"
+
+
+def giveaway_status_emoji(status: str) -> str:
+    status = status.lower().strip()
+    if status == "active":
+        return "🎉"
+    if status == "ended":
+        return "✅"
+    if status == "cancelled":
+        return "🚫"
+    return "📌"
+
+
+def build_active_giveaway_embed(
+    *,
+    prize: str,
+    winner_amount: int,
+    ends_at: int,
+    duration_text: str,
+    host: discord.Member | discord.User | None,
+    message_id: int | None,
+    test: bool = False,
+) -> discord.Embed:
+    title = "🎉 TEST GIVEAWAY 🎉" if test else "🎉 GIVEAWAY 🎉"
+    host_text = host.mention if host is not None else "Unknown"
+    message_text = f"`{message_id}`" if message_id else "`posting...`"
+    embed = discord.Embed(
+        title=title,
+        description=(
+            f"Prize: {prize}\n"
+            f"Winners: {winner_amount}\n"
+            f"Duration: {duration_text}\n"
+            f"Ends: <t:{ends_at}:R> • <t:{ends_at}:f>\n"
+            f"Hosted by: {host_text}\n"
+            f"Message ID: {message_text}\n\n"
+            "React with 🎉 to enter!"
+        ),
+        color=discord.Color.gold(),
+        timestamp=datetime.now(UK_TIMEZONE),
+    )
+    embed.set_footer(text="Use the Message ID for reroll, end, or cancel commands.")
+    return embed
+
+
+def build_giveaway_result_embed(
+    data: dict[str, Any],
+    *,
+    title: str,
+    color: discord.Color,
+    entry_count: int | None = None,
+    winners: list[discord.User | discord.Member] | None = None,
+    note: str | None = None,
+) -> discord.Embed:
+    prize = str(data.get("prize") or "this giveaway")
+    winner_amount = _safe_int(data.get("winner_amount"), 1)
+    message_id = _safe_int(data.get("message_id"), 0)
+    host_id = _safe_int(data.get("host_id"), 0)
+    ended_at = _safe_int(data.get("ended_at"), int(time.time()))
+    cancelled_at = _safe_int(data.get("cancelled_at"), 0)
+    status_time = cancelled_at or ended_at or int(time.time())
+
+    lines = [
+        f"Prize: {prize}",
+        f"Requested winners: {winner_amount}",
+    ]
+    if entry_count is not None:
+        lines.append(f"Entries: {entry_count}")
+    if host_id:
+        lines.append(f"Hosted by: <@{host_id}>")
+    if status_time:
+        lines.append(f"Time: <t:{status_time}:R> • <t:{status_time}:f>")
+    if message_id:
+        lines.append(f"Message ID: `{message_id}`")
+
+    lines.append("")
+    if winners is not None:
+        lines.append(format_giveaway_winners(winners) if winners else "No winners were drawn.")
+    else:
+        lines.append(format_stored_winner_ids(data.get("winner_ids", [])))
+
+    if note:
+        lines.append(f"\n{note}")
+
+    embed = discord.Embed(
+        title=title,
+        description="\n".join(lines),
+        color=color,
+        timestamp=datetime.now(UK_TIMEZONE),
+    )
+    return embed
+
+
+async def edit_original_giveaway_message(message: discord.Message, data: dict[str, Any], embed: discord.Embed) -> None:
+    try:
+        await message.edit(embed=embed)
+    except discord.HTTPException:
+        pass
+
+
+async def get_giveaway_entries(message: discord.Message) -> list[discord.User | discord.Member]:
+    entries_by_id: dict[int, discord.User | discord.Member] = {}
+    for reaction in message.reactions:
+        if str(reaction.emoji) != "🎉":
+            continue
+        async for user in reaction.users():
+            if not user.bot:
+                entries_by_id[user.id] = user
+    return list(entries_by_id.values())
+
+
+async def pick_giveaway_winners(
+    message: discord.Message,
+    winner_amount: int,
+    *,
+    excluded_user_ids: set[int] | None = None,
+) -> tuple[list[discord.User | discord.Member], int]:
+    entries = await get_giveaway_entries(message)
+    if not entries:
+        return [], 0
+
+    requested = min(winner_amount, len(entries))
+    eligible = entries
+    if excluded_user_ids:
+        fresh_entries = [entry for entry in entries if entry.id not in excluded_user_ids]
+        # Prefer new winners on reroll, but fall back to all entries if there are not enough fresh entries.
+        if len(fresh_entries) >= requested:
+            eligible = fresh_entries
+
+    winner_total = min(winner_amount, len(eligible))
+    return random.sample(eligible, winner_total), len(entries)
+
+
+def mark_giveaway_finished(
+    data: dict[str, Any],
+    winners: list[discord.User | discord.Member],
+    *,
+    note: str | None = None,
+    ended_by: discord.Member | discord.User | None = None,
+) -> None:
+    data["status"] = "ended"
+    data["ended_at"] = int(time.time())
+    data["winner_ids"] = [winner.id for winner in winners]
+    if ended_by is not None:
+        data["ended_by_id"] = ended_by.id
+        data["ended_by_name"] = str(ended_by)
+    if note:
+        data["end_note"] = note
+
+
+def mark_giveaway_cancelled(data: dict[str, Any], actor: discord.Member | discord.User | None = None) -> None:
+    data["status"] = "cancelled"
+    data["cancelled_at"] = int(time.time())
+    if actor is not None:
+        data["cancelled_by_id"] = actor.id
+        data["cancelled_by_name"] = str(actor)
+
+
+async def finish_giveaway_by_data(data: dict[str, Any], *, ended_by: discord.Member | discord.User | None = None) -> str:
     guild = bot.get_guild(int(data["guild_id"]))
     if guild is None:
-        return
+        mark_giveaway_finished(data, [], note="Guild could not be found.", ended_by=ended_by)
+        return "❌ I could not find the server for that giveaway."
     channel = await get_text_channel(guild, int(data["channel_id"]))
     if channel is None:
-        return
+        mark_giveaway_finished(data, [], note="Giveaway channel could not be found.", ended_by=ended_by)
+        return "❌ I could not find the channel for that giveaway."
 
     prize = str(data["prize"])
+    winner_amount = _safe_int(data.get("winner_amount"), 1)
+    if winner_amount <= 0:
+        winner_amount = 1
+
     try:
         message = await channel.fetch_message(int(data["message_id"]))
     except discord.HTTPException:
+        mark_giveaway_finished(data, [], note="Giveaway message was deleted or could not be found.", ended_by=ended_by)
         await channel.send(f"❌ Giveaway message for {prize} was deleted or could not be found.")
-        return
+        return f"❌ Giveaway message for {prize} was deleted or could not be found."
 
-    entries: list[discord.User | discord.Member] = []
-    for reaction in message.reactions:
-        if str(reaction.emoji) == "🎉":
-            async for user in reaction.users():
-                if not user.bot:
-                    entries.append(user)
+    winners, entry_count = await pick_giveaway_winners(message, winner_amount)
 
-    if not entries:
+    if not winners:
+        mark_giveaway_finished(data, [], note="No valid entries.", ended_by=ended_by)
+        no_winner_embed = build_giveaway_result_embed(
+            data,
+            title="🎉 GIVEAWAY ENDED 🎉",
+            color=discord.Color.orange(),
+            entry_count=entry_count,
+            winners=[],
+            note="No valid entries were found.",
+        )
+        await edit_original_giveaway_message(message, data, no_winner_embed)
         await channel.send(f"❌ No one entered the {prize} giveaway.")
-        return
+        return f"❌ No one entered the {prize} giveaway."
 
-    winner = random.choice(entries)
-    end_embed = discord.Embed(
+    mark_giveaway_finished(data, winners, ended_by=ended_by)
+    short_note = ""
+    if len(winners) < winner_amount:
+        short_note = f"Only {len(winners)} valid entrant(s) were available for {winner_amount} requested {giveaway_winner_word(winner_amount)}."
+
+    end_embed = build_giveaway_result_embed(
+        data,
         title="🎉 GIVEAWAY ENDED 🎉",
-        description=f"Prize: {prize}\n\nWinner: {winner.mention}",
         color=discord.Color.green(),
+        entry_count=entry_count,
+        winners=winners,
+        note=short_note or None,
     )
-    await channel.send(embed=end_embed)
-    await channel.send(f"🎉 Congratulations {winner.mention}! You won {prize}!")
+    await edit_original_giveaway_message(message, data, end_embed)
+    await channel.send(embed=end_embed, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+    await channel.send(
+        f"🎉 Congratulations {', '.join(winner.mention for winner in winners)}! You won {prize}!",
+        allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+    )
+    return f"✅ Ended {prize} with {len(winners)} winner(s) in {channel.mention}."
 
 
-async def start_giveaway_in_channel(channel: discord.TextChannel, amount: int, prize_type: str, seconds: int, test: bool = False) -> str:
-    if amount <= 0:
-        return "❌ Amount must be at least 1."
+async def start_giveaway_in_channel(
+    channel: discord.TextChannel,
+    amount: int,
+    prize_type: str,
+    seconds: int,
+    test: bool = False,
+    winner_amount: int = 1,
+    host: discord.Member | discord.User | None = None,
+) -> str:
+    number_error = validate_giveaway_numbers(amount, winner_amount)
+    if number_error:
+        return number_error
+
+    try:
+        seconds = parse_duration_to_seconds(format_duration(seconds), GIVEAWAY_TIME)
+    except ValueError as exc:
+        return f"❌ {exc}"
+
     prize = make_prize(amount, prize_type)
     if prize is None:
         return "❌ Use Normal, Hard Trade, or Very Hard Trade."
 
-    title = "🎉 TEST GIVEAWAY 🎉" if test else "🎉 GIVEAWAY 🎉"
-    time_text = "30 seconds" if test else "24 hours"
-    embed = discord.Embed(
-        title=title,
-        description=f"Prize: {prize}\n\nReact with 🎉 to enter!\n\n⏰ Ends in {time_text}",
-        color=discord.Color.gold(),
+    started_at = int(time.time())
+    ends_at = started_at + seconds
+    duration_text = format_duration(seconds)
+    embed = build_active_giveaway_embed(
+        prize=prize,
+        winner_amount=winner_amount,
+        ends_at=ends_at,
+        duration_text=duration_text,
+        host=host,
+        message_id=None,
+        test=test,
     )
     message = await channel.send(embed=embed)
     await message.add_reaction("🎉")
 
+    final_embed = build_active_giveaway_embed(
+        prize=prize,
+        winner_amount=winner_amount,
+        ends_at=ends_at,
+        duration_text=duration_text,
+        host=host,
+        message_id=message.id,
+        test=test,
+    )
+    await edit_original_giveaway_message(message, {}, final_embed)
+
     giveaway_id = str(message.id)
-    active_giveaways[giveaway_id] = {
-        "guild_id": channel.guild.id,
-        "channel_id": channel.id,
-        "message_id": message.id,
-        "prize": prize,
-        "ends_at": int(time.time() + seconds),
-    }
-    await save_giveaways()
-    return f"✅ Started giveaway for {prize}."
+    async with giveaway_lock:
+        active_giveaways[giveaway_id] = {
+            "guild_id": channel.guild.id,
+            "channel_id": channel.id,
+            "message_id": message.id,
+            "prize": prize,
+            "prize_amount": amount,
+            "prize_type": prize_type.lower().strip(),
+            "winner_amount": winner_amount,
+            "status": "active",
+            "started_at": started_at,
+            "ends_at": ends_at,
+            "duration_seconds": seconds,
+            "test": bool(test),
+            "host_id": host.id if host is not None else None,
+            "host_name": str(host) if host is not None else None,
+            "winner_ids": [],
+            "rerolls": [],
+        }
+        await save_giveaways()
+    return f"✅ Started giveaway for {prize} with {winner_amount} {giveaway_winner_word(winner_amount)}. Ends <t:{ends_at}:R>. Message ID: `{message.id}`"
+
+
+async def reroll_giveaway_in_channel(channel: discord.TextChannel, message_id: int, winner_amount: int = 1) -> str:
+    if winner_amount <= 0:
+        return "❌ Winner amount must be at least 1."
+    if winner_amount > MAX_GIVEAWAY_WINNERS:
+        return f"❌ Winner amount cannot be more than {MAX_GIVEAWAY_WINNERS}."
+
+    giveaway_id = str(message_id)
+    stored_data = active_giveaways.get(giveaway_id)
+    giveaway_channel = channel
+    prize = "this giveaway"
+    previous_winner_ids: set[int] = set()
+
+    if isinstance(stored_data, dict):
+        ends_at = _safe_int(stored_data.get("ends_at"), 0)
+        status = str(stored_data.get("status") or "active")
+        if status == "cancelled":
+            return "❌ That giveaway was cancelled, so it cannot be rerolled."
+        if status != "ended" and ends_at > int(time.time()):
+            return "❌ That giveaway is still running. Use `!giveawayend` first or wait until it ends before rerolling."
+
+        guild = bot.get_guild(_safe_int(stored_data.get("guild_id"), 0)) or channel.guild
+        if guild is not None:
+            stored_channel = await get_text_channel(guild, _safe_int(stored_data.get("channel_id"), 0))
+            if stored_channel is not None:
+                giveaway_channel = stored_channel
+        prize = str(stored_data.get("prize") or prize)
+        previous_winner_ids = {
+            _safe_int(user_id, 0)
+            for user_id in stored_data.get("winner_ids", [])
+            if _safe_int(user_id, 0) > 0
+        }
+
+    try:
+        message = await giveaway_channel.fetch_message(message_id)
+    except discord.HTTPException:
+        return "❌ I could not find that giveaway message. Use the original giveaway message ID in the same channel, or reroll one started after this update."
+
+    if not isinstance(stored_data, dict):
+        prize = prize_from_giveaway_message(message)
+
+    winners, entry_count = await pick_giveaway_winners(message, winner_amount, excluded_user_ids=previous_winner_ids)
+    if not winners:
+        return f"❌ No valid entries found for {prize}."
+
+    if isinstance(stored_data, dict):
+        stored_data["status"] = "ended"
+        stored_data["winner_amount"] = winner_amount
+        stored_data["winner_ids"] = [winner.id for winner in winners]
+        stored_data["last_rerolled_at"] = int(time.time())
+
+    reroll_embed = build_giveaway_result_embed(
+        stored_data if isinstance(stored_data, dict) else {"prize": prize, "winner_amount": winner_amount, "message_id": message_id},
+        title="🔁 GIVEAWAY REROLLED 🔁",
+        color=discord.Color.blurple(),
+        entry_count=entry_count,
+        winners=winners,
+    )
+    await giveaway_channel.send(embed=reroll_embed, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+    await giveaway_channel.send(
+        f"🎉 New giveaway winner(s): {', '.join(winner.mention for winner in winners)}",
+        allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+    )
+
+    if isinstance(stored_data, dict):
+        async with giveaway_lock:
+            rerolls = stored_data.get("rerolls")
+            if not isinstance(rerolls, list):
+                rerolls = []
+                stored_data["rerolls"] = rerolls
+            rerolls.append(
+                {
+                    "time": int(time.time()),
+                    "winner_amount": winner_amount,
+                    "winner_ids": [winner.id for winner in winners],
+                }
+            )
+            await save_giveaways()
+
+    return f"✅ Rerolled {prize} with {len(winners)} winner(s) in {giveaway_channel.mention}."
+
+
+async def end_giveaway_in_channel(channel: discord.TextChannel, message_id: int, actor: discord.Member | discord.User | None = None) -> str:
+    giveaway_id = str(message_id)
+    stored_data = active_giveaways.get(giveaway_id)
+    if not isinstance(stored_data, dict):
+        return "❌ I can only end giveaways started after this update. Use the original giveaway Message ID."
+
+    status = str(stored_data.get("status") or "active")
+    if status == "ended":
+        return "❌ That giveaway has already ended. Use reroll if you need new winners."
+    if status == "cancelled":
+        return "❌ That giveaway was cancelled."
+
+    result = await finish_giveaway_by_data(stored_data, ended_by=actor)
+    async with giveaway_lock:
+        active_giveaways[giveaway_id] = stored_data
+        await save_giveaways()
+    return result
+
+
+async def cancel_giveaway_in_channel(channel: discord.TextChannel, message_id: int, actor: discord.Member | discord.User | None = None) -> str:
+    giveaway_id = str(message_id)
+    stored_data = active_giveaways.get(giveaway_id)
+    if not isinstance(stored_data, dict):
+        return "❌ I can only cancel giveaways started after this update. Use the original giveaway Message ID."
+
+    status = str(stored_data.get("status") or "active")
+    if status == "ended":
+        return "❌ That giveaway has already ended, so it cannot be cancelled."
+    if status == "cancelled":
+        return "❌ That giveaway is already cancelled."
+
+    guild = bot.get_guild(_safe_int(stored_data.get("guild_id"), 0)) or channel.guild
+    giveaway_channel = channel
+    if guild is not None:
+        stored_channel = await get_text_channel(guild, _safe_int(stored_data.get("channel_id"), 0))
+        if stored_channel is not None:
+            giveaway_channel = stored_channel
+
+    mark_giveaway_cancelled(stored_data, actor)
+
+    cancel_embed = build_giveaway_result_embed(
+        stored_data,
+        title="🚫 GIVEAWAY CANCELLED 🚫",
+        color=discord.Color.red(),
+        note=f"Cancelled by {actor.mention}." if actor is not None else "Cancelled.",
+    )
+
+    try:
+        message = await giveaway_channel.fetch_message(message_id)
+        await edit_original_giveaway_message(message, stored_data, cancel_embed)
+    except discord.HTTPException:
+        pass
+
+    await giveaway_channel.send(embed=cancel_embed, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+
+    async with giveaway_lock:
+        active_giveaways[giveaway_id] = stored_data
+        await save_giveaways()
+    return f"✅ Cancelled giveaway `{message_id}` in {giveaway_channel.mention}."
+
+
+def build_giveaway_list_embed(guild: discord.Guild) -> discord.Embed:
+    records: list[dict[str, Any]] = []
+    for data in active_giveaways.values():
+        if not isinstance(data, dict):
+            continue
+        if _safe_int(data.get("guild_id"), 0) != guild.id:
+            continue
+        records.append(data)
+
+    active_records = [record for record in records if str(record.get("status") or "active") == "active"]
+    inactive_records = [record for record in records if str(record.get("status") or "active") != "active"]
+    active_records.sort(key=lambda record: _safe_int(record.get("ends_at"), 0))
+    inactive_records.sort(
+        key=lambda record: max(
+            _safe_int(record.get("ended_at"), 0),
+            _safe_int(record.get("cancelled_at"), 0),
+            _safe_int(record.get("started_at"), 0),
+        ),
+        reverse=True,
+    )
+    ordered = (active_records + inactive_records)[:20]
+
+    embed = discord.Embed(
+        title="🎉 XSI Giveaways",
+        description=f"Active: **{len(active_records)}** • Saved: **{len(records)}**",
+        color=discord.Color.gold() if active_records else discord.Color.blurple(),
+        timestamp=datetime.now(UK_TIMEZONE),
+    )
+
+    if not ordered:
+        embed.description = "No giveaways are saved yet."
+        return embed
+
+    for record in ordered:
+        status = str(record.get("status") or "active").title()
+        status_key = status.lower()
+        prize = str(record.get("prize") or "Unknown prize")
+        message_id = _safe_int(record.get("message_id"), 0)
+        channel_id = _safe_int(record.get("channel_id"), 0)
+        winner_amount = _safe_int(record.get("winner_amount"), 1)
+        ends_at = _safe_int(record.get("ends_at"), 0)
+        ended_at = _safe_int(record.get("ended_at"), 0)
+        cancelled_at = _safe_int(record.get("cancelled_at"), 0)
+
+        timing = ""
+        if status_key == "active" and ends_at:
+            timing = f"Ends: <t:{ends_at}:R>"
+        elif status_key == "ended" and ended_at:
+            timing = f"Ended: <t:{ended_at}:R>"
+        elif status_key == "cancelled" and cancelled_at:
+            timing = f"Cancelled: <t:{cancelled_at}:R>"
+
+        value_lines = [
+            f"Status: **{status}**",
+            f"Channel: <#{channel_id}>" if channel_id else "Channel: Unknown",
+            f"Winners: {winner_amount}",
+        ]
+        if timing:
+            value_lines.append(timing)
+        if message_id:
+            value_lines.append(f"Message ID: `{message_id}`")
+
+        embed.add_field(
+            name=f"{giveaway_status_emoji(status_key)} {prize}"[:256],
+            value="\n".join(value_lines)[:1024],
+            inline=False,
+        )
+
+    if len(records) > len(ordered):
+        embed.set_footer(text=f"Showing newest/active {len(ordered)} giveaways only.")
+    return embed
 
 
 # ============================================================
@@ -2420,19 +3026,22 @@ async def availability_refresher() -> None:
 async def giveaway_checker() -> None:
     await bot.wait_until_ready()
     now = int(time.time())
-    finished: list[str] = []
+    invalid_ids: list[str] = []
+    changed = False
 
     for giveaway_id, data in list(active_giveaways.items()):
         if not isinstance(data, dict):
-            finished.append(giveaway_id)
+            invalid_ids.append(giveaway_id)
             continue
-        if now >= int(data.get("ends_at", 0)):
+        if str(data.get("status") or "active") == "ended":
+            continue
+        if now >= _safe_int(data.get("ends_at"), 0):
             await finish_giveaway_by_data(data)
-            finished.append(giveaway_id)
+            changed = True
 
-    if finished:
+    if invalid_ids or changed:
         async with giveaway_lock:
-            for giveaway_id in finished:
+            for giveaway_id in invalid_ids:
                 active_giveaways.pop(giveaway_id, None)
             await save_giveaways()
 
@@ -2905,6 +3514,101 @@ async def unclaim_ticket(ctx: commands.Context) -> None:
     await ctx.send("✅ Ticket unclaimed.")
 
 
+async def update_ticket_member_access(
+    channel: discord.TextChannel,
+    data: dict[str, Any],
+    member: discord.Member,
+    *,
+    allow: bool,
+    actor: discord.Member | discord.User,
+) -> str:
+    owner_id = _safe_int(data.get("owner_id"), 0)
+    if not allow and member.id == owner_id:
+        return "❌ You cannot remove the ticket owner from their own ticket. Close the ticket instead."
+
+    if allow:
+        overwrite = discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+            attach_files=True,
+        )
+        action_text = "added to"
+        event_type = "ticket_user_added"
+        event_text = f"{member} was added to the ticket by {actor}."
+    else:
+        overwrite = None
+        action_text = "removed from"
+        event_type = "ticket_user_removed"
+        event_text = f"{member} was removed from the ticket by {actor}."
+
+    try:
+        await channel.set_permissions(
+            member,
+            overwrite=overwrite,
+            reason=f"XSI ticket user {'add' if allow else 'remove'} by {actor} ({actor.id})",
+        )
+    except discord.Forbidden:
+        return "❌ I do not have permission to edit this ticket's channel permissions."
+    except discord.HTTPException:
+        return "❌ Discord rejected the permission update. Try again or check channel permissions."
+
+    extra_users = data.get("extra_user_ids")
+    if not isinstance(extra_users, list):
+        extra_users = []
+        data["extra_user_ids"] = extra_users
+
+    if allow:
+        if member.id not in extra_users:
+            extra_users.append(member.id)
+    else:
+        data["extra_user_ids"] = [user_id for user_id in extra_users if _safe_int(user_id, 0) != member.id]
+
+    ticket_owners[str(channel.id)] = data
+    await save_ticket_owners()
+    await append_ticket_record_event_for_channel(
+        channel,
+        data,
+        event_type,
+        event_text,
+        actor=actor,
+        extra={"target_user_id": member.id, "target_user_name": str(member)},
+    )
+
+    note = ""
+    if not allow and (member.guild_permissions.administrator or has_staff_role(member)):
+        note = " They may still see the ticket through admin/staff permissions."
+    return f"✅ {member.mention} {action_text} this ticket.{note}"
+
+
+@bot.command(name="ticketadd", aliases=["addticketuser", "ticketuseradd"])
+@commands.has_permissions(manage_messages=True)
+async def ticketadd_prefix(ctx: commands.Context, member: discord.Member) -> None:
+    if ctx.guild is None or not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("❌ This command only works inside a ticket channel.")
+        return
+    data = ticket_owners.get(str(ctx.channel.id))
+    if not isinstance(data, dict):
+        await ctx.send("❌ This is not a tracked ticket.")
+        return
+    result = await update_ticket_member_access(ctx.channel, data, member, allow=True, actor=ctx.author)
+    await ctx.send(result, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+
+
+@bot.command(name="ticketremove", aliases=["removeticketuser", "ticketuserremove"])
+@commands.has_permissions(manage_messages=True)
+async def ticketremove_prefix(ctx: commands.Context, member: discord.Member) -> None:
+    if ctx.guild is None or not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("❌ This command only works inside a ticket channel.")
+        return
+    data = ticket_owners.get(str(ctx.channel.id))
+    if not isinstance(data, dict):
+        await ctx.send("❌ This is not a tracked ticket.")
+        return
+    result = await update_ticket_member_access(ctx.channel, data, member, allow=False, actor=ctx.author)
+    await ctx.send(result, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+
+
 @bot.command(name="setrecordcategory")
 @commands.has_permissions(manage_channels=True)
 async def setrecordcategory_prefix(ctx: commands.Context, category_id: int | None = None) -> None:
@@ -3157,7 +3861,19 @@ async def giveaway(ctx: commands.Context, amount: int, *, prize_type: str) -> No
     if not isinstance(ctx.channel, discord.TextChannel):
         await ctx.send("❌ This command only works in a text channel.")
         return
-    result = await start_giveaway_in_channel(ctx.channel, amount, prize_type, GIVEAWAY_TIME)
+    try:
+        winner_amount, clean_prize_type, duration_seconds, _ = parse_giveaway_options(prize_type, GIVEAWAY_TIME)
+    except ValueError as exc:
+        await ctx.send(f"❌ {exc}")
+        return
+    result = await start_giveaway_in_channel(
+        ctx.channel,
+        amount,
+        clean_prize_type,
+        duration_seconds,
+        winner_amount=winner_amount,
+        host=ctx.author,
+    )
     await ctx.send(result)
 
 
@@ -3167,8 +3883,96 @@ async def testgiveaway(ctx: commands.Context, amount: int, *, prize_type: str) -
     if not isinstance(ctx.channel, discord.TextChannel):
         await ctx.send("❌ This command only works in a text channel.")
         return
-    result = await start_giveaway_in_channel(ctx.channel, amount, prize_type, TEST_GIVEAWAY_TIME, test=True)
+    try:
+        winner_amount, clean_prize_type, duration_seconds, _ = parse_giveaway_options(prize_type, TEST_GIVEAWAY_TIME)
+    except ValueError as exc:
+        await ctx.send(f"❌ {exc}")
+        return
+    result = await start_giveaway_in_channel(
+        ctx.channel,
+        amount,
+        clean_prize_type,
+        duration_seconds,
+        test=True,
+        winner_amount=winner_amount,
+        host=ctx.author,
+    )
     await ctx.send(result)
+
+
+@bot.command(name="giveawayreroll", aliases=["rerollgiveaway", "reroll"])
+@commands.has_permissions(administrator=True)
+async def giveawayreroll(ctx: commands.Context, *, args: str = "") -> None:
+    if not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("❌ This command only works in a text channel.")
+        return
+
+    parts = args.split()
+    reference_message_id = ctx.message.reference.message_id if ctx.message.reference else None
+    message_id: int | None = None
+    winner_amount = 1
+
+    if reference_message_id is not None:
+        message_id = int(reference_message_id)
+
+    if parts:
+        if not all(part.isdigit() for part in parts[:2]):
+            await ctx.send("❌ Use `!giveawayreroll <message_id> [winner_amount]` or reply to the giveaway with `!giveawayreroll [winner_amount]`.")
+            return
+        first_number = int(parts[0])
+        if message_id is not None and len(parts) == 1 and first_number < 10_000_000_000:
+            winner_amount = first_number
+        else:
+            message_id = first_number
+            if len(parts) >= 2:
+                winner_amount = int(parts[1])
+
+    if message_id is None:
+        await ctx.send("❌ Reply to the giveaway message with `!giveawayreroll` or use `!giveawayreroll <message_id> [winner_amount]`.")
+        return
+
+    result = await reroll_giveaway_in_channel(ctx.channel, message_id, winner_amount)
+    await ctx.send(result)
+
+
+@bot.command(name="giveawayend", aliases=["endgiveaway"])
+@commands.has_permissions(administrator=True)
+async def giveawayend_prefix(ctx: commands.Context, message_id: int = 0) -> None:
+    if not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("❌ This command only works in a text channel.")
+        return
+    reference_message_id = ctx.message.reference.message_id if ctx.message.reference else None
+    final_message_id = message_id or reference_message_id
+    if final_message_id is None:
+        await ctx.send("❌ Use `!giveawayend <message_id>` or reply to the giveaway with `!giveawayend`.")
+        return
+    result = await end_giveaway_in_channel(ctx.channel, int(final_message_id), ctx.author)
+    await ctx.send(result)
+
+
+@bot.command(name="giveawaycancel", aliases=["cancelgiveaway"])
+@commands.has_permissions(administrator=True)
+async def giveawaycancel_prefix(ctx: commands.Context, message_id: int = 0) -> None:
+    if not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("❌ This command only works in a text channel.")
+        return
+    reference_message_id = ctx.message.reference.message_id if ctx.message.reference else None
+    final_message_id = message_id or reference_message_id
+    if final_message_id is None:
+        await ctx.send("❌ Use `!giveawaycancel <message_id>` or reply to the giveaway with `!giveawaycancel`.")
+        return
+    result = await cancel_giveaway_in_channel(ctx.channel, int(final_message_id), ctx.author)
+    await ctx.send(result)
+
+
+@bot.command(name="giveawaylist", aliases=["giveaways", "listgiveaways"])
+@commands.has_permissions(administrator=True)
+async def giveawaylist_prefix(ctx: commands.Context) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    embed = build_giveaway_list_embed(ctx.guild)
+    await ctx.send(embed=embed)
 
 
 # ============================================================
@@ -3573,6 +4377,36 @@ async def slash_unclaim(interaction: discord.Interaction) -> None:
     await interaction.response.send_message("✅ Ticket unclaimed.")
 
 
+@bot.tree.command(name="ticketadd", description="Add a member to the current ticket")
+@app_commands.describe(member="Member to add to this ticket")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_ticketadd(interaction: discord.Interaction, member: discord.Member) -> None:
+    if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This only works inside a ticket channel.", ephemeral=True)
+        return
+    data = ticket_owners.get(str(interaction.channel.id))
+    if not isinstance(data, dict):
+        await interaction.response.send_message("❌ This is not a tracked ticket.", ephemeral=True)
+        return
+    result = await update_ticket_member_access(interaction.channel, data, member, allow=True, actor=interaction.user)
+    await interaction.response.send_message(result, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+
+
+@bot.tree.command(name="ticketremove", description="Remove a member from the current ticket")
+@app_commands.describe(member="Member to remove from this ticket")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_ticketremove(interaction: discord.Interaction, member: discord.Member) -> None:
+    if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This only works inside a ticket channel.", ephemeral=True)
+        return
+    data = ticket_owners.get(str(interaction.channel.id))
+    if not isinstance(data, dict):
+        await interaction.response.send_message("❌ This is not a tracked ticket.", ephemeral=True)
+        return
+    result = await update_ticket_member_access(interaction.channel, data, member, allow=False, actor=interaction.user)
+    await interaction.response.send_message(result, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+
+
 @bot.tree.command(name="setrecordcategory", description="Set the optional category for temporary /record channels")
 @app_commands.checks.has_permissions(manage_channels=True)
 async def slash_setrecordcategory(interaction: discord.Interaction, category: discord.CategoryChannel) -> None:
@@ -3801,26 +4635,131 @@ async def slash_slotinfo(interaction: discord.Interaction) -> None:
     await interaction.response.send_message("❌ Sloty has been removed from this bot.")
 
 
-@bot.tree.command(name="giveaway", description="Start a 24 hour giveaway")
-@app_commands.describe(prize_type="Normal, Hard Trade, or Very Hard Trade")
+@bot.tree.command(name="giveaway", description="Start a giveaway")
+@app_commands.describe(
+    amount="Prize amount, for example 1 Normal Car or 3 Hard Trades",
+    prize_type="Normal, Hard Trade, or Very Hard Trade",
+    winner_amount="How many winners to draw. Default is 1.",
+    duration="How long the giveaway runs: 30s, 10m, 2h, or 1d. Default is 24h.",
+)
 @app_commands.checks.has_permissions(administrator=True)
-async def slash_giveaway(interaction: discord.Interaction, amount: int, prize_type: str) -> None:
+async def slash_giveaway(
+    interaction: discord.Interaction,
+    amount: int,
+    prize_type: str,
+    winner_amount: int = 1,
+    duration: str = "24h",
+) -> None:
     if not isinstance(interaction.channel, discord.TextChannel):
         await interaction.response.send_message("❌ This only works in a text channel.", ephemeral=True)
         return
-    result = await start_giveaway_in_channel(interaction.channel, amount, prize_type, GIVEAWAY_TIME)
+    try:
+        duration_seconds = parse_duration_to_seconds(duration, GIVEAWAY_TIME)
+    except ValueError as exc:
+        await interaction.response.send_message(f"❌ {exc}", ephemeral=True)
+        return
+    result = await start_giveaway_in_channel(
+        interaction.channel,
+        amount,
+        prize_type,
+        duration_seconds,
+        winner_amount=winner_amount,
+        host=interaction.user,
+    )
     await interaction.response.send_message(result, ephemeral=True)
 
 
-@bot.tree.command(name="testgiveaway", description="Start a 30 second test giveaway")
-@app_commands.describe(prize_type="Normal, Hard Trade, or Very Hard Trade")
+@bot.tree.command(name="testgiveaway", description="Start a quick test giveaway")
+@app_commands.describe(
+    amount="Prize amount, for example 1 Normal Car or 3 Hard Trades",
+    prize_type="Normal, Hard Trade, or Very Hard Trade",
+    winner_amount="How many winners to draw. Default is 1.",
+    duration="Optional test duration: 10s, 30s, 1m, etc. Default is 30s.",
+)
 @app_commands.checks.has_permissions(administrator=True)
-async def slash_testgiveaway(interaction: discord.Interaction, amount: int, prize_type: str) -> None:
+async def slash_testgiveaway(
+    interaction: discord.Interaction,
+    amount: int,
+    prize_type: str,
+    winner_amount: int = 1,
+    duration: str = "30s",
+) -> None:
     if not isinstance(interaction.channel, discord.TextChannel):
         await interaction.response.send_message("❌ This only works in a text channel.", ephemeral=True)
         return
-    result = await start_giveaway_in_channel(interaction.channel, amount, prize_type, TEST_GIVEAWAY_TIME, test=True)
+    try:
+        duration_seconds = parse_duration_to_seconds(duration, TEST_GIVEAWAY_TIME)
+    except ValueError as exc:
+        await interaction.response.send_message(f"❌ {exc}", ephemeral=True)
+        return
+    result = await start_giveaway_in_channel(
+        interaction.channel,
+        amount,
+        prize_type,
+        duration_seconds,
+        test=True,
+        winner_amount=winner_amount,
+        host=interaction.user,
+    )
     await interaction.response.send_message(result, ephemeral=True)
+
+
+@bot.tree.command(name="giveawayreroll", description="Reroll an ended giveaway")
+@app_commands.describe(
+    message_id="Original giveaway message ID",
+    winner_amount="How many winners to draw. Default is 1.",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_giveawayreroll(interaction: discord.Interaction, message_id: str, winner_amount: int = 1) -> None:
+    if not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This only works in a text channel.", ephemeral=True)
+        return
+    if not message_id.isdigit():
+        await interaction.response.send_message("❌ Message ID must be numbers only.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    result = await reroll_giveaway_in_channel(interaction.channel, int(message_id), winner_amount)
+    await interaction.followup.send(result, ephemeral=True)
+
+
+@bot.tree.command(name="giveawayend", description="End an active giveaway now")
+@app_commands.describe(message_id="Original giveaway message ID")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_giveawayend(interaction: discord.Interaction, message_id: str) -> None:
+    if not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This only works in a text channel.", ephemeral=True)
+        return
+    if not message_id.isdigit():
+        await interaction.response.send_message("❌ Message ID must be numbers only.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    result = await end_giveaway_in_channel(interaction.channel, int(message_id), interaction.user)
+    await interaction.followup.send(result, ephemeral=True)
+
+
+@bot.tree.command(name="giveawaycancel", description="Cancel an active giveaway")
+@app_commands.describe(message_id="Original giveaway message ID")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_giveawaycancel(interaction: discord.Interaction, message_id: str) -> None:
+    if not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This only works in a text channel.", ephemeral=True)
+        return
+    if not message_id.isdigit():
+        await interaction.response.send_message("❌ Message ID must be numbers only.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    result = await cancel_giveaway_in_channel(interaction.channel, int(message_id), interaction.user)
+    await interaction.followup.send(result, ephemeral=True)
+
+
+@bot.tree.command(name="giveawaylist", description="List saved giveaways")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_giveawaylist(interaction: discord.Interaction) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    embed = build_giveaway_list_embed(interaction.guild)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ============================================================
@@ -3834,7 +4773,7 @@ def build_required_permissions_embed(guild: discord.Guild) -> discord.Embed:
         ("View Channels", perms.view_channel, "see setup/ticket/log channels"),
         ("Send Messages", perms.send_messages, "send replies, welcomes, panels, and logs"),
         ("Read Message History", perms.read_message_history, "read ticket/giveaway messages"),
-        ("Manage Channels", perms.manage_channels, "create setup categories and ticket channels"),
+        ("Manage Channels", perms.manage_channels, "create setup categories, ticket channels, and ticket access"),
         ("Manage Messages", perms.manage_messages, "delete banned messages and clean commands"),
         ("Embed Links", perms.embed_links, "send ticket, setup, warning, and log embeds"),
         ("Add Reactions", perms.add_reactions, "add the giveaway reaction"),
@@ -3921,7 +4860,12 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
             "`!refreshticketpanel`\n"
             "`!kick @user reason`\n"
             "`!kick @user --test reason`\n"
-            "`!warn @user reason`"
+            "`!warn @user reason`\n"
+            "`!ticketadd @user` / `!ticketremove @user`\n"
+            "`!giveaway 1 normal 3 2h` = 1 Normal Car, 3 winners, 2 hours\n"
+            "`!giveawayend <message_id>` / `!giveawaycancel <message_id>`\n"
+            "`!giveawaylist`\n"
+            "`!giveawayreroll <message_id> [winner_amount]`"
         )
         return
     if isinstance(error, commands.BadArgument):
@@ -3947,3 +4891,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
