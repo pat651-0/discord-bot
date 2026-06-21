@@ -4144,9 +4144,13 @@ async def slash_setwallchannel(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(f"✅ Wall channel set to {interaction.channel.mention}.", ephemeral=True)
 
 
-@bot.tree.command(name="setleaveschannel", description="Set this channel as leaves / Board of Guilt channel")
-@app_commands.checks.has_permissions(administrator=True)
-async def slash_setleaveschannel(interaction: discord.Interaction) -> None:
+async def set_leaves_guilt_channel_from_interaction(interaction: discord.Interaction) -> None:
+    """Shared slash-command helper for leaves / Board of Guilt channel setup.
+
+    Do not call another decorated slash command directly from a slash command.
+    app_commands wraps decorated callbacks, so reusing the decorated function can
+    raise an internal error and make Discord show "Something went wrong".
+    """
     if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
         await interaction.response.send_message("❌ This only works inside a server text channel.", ephemeral=True)
         return
@@ -4157,10 +4161,23 @@ async def slash_setleaveschannel(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(f"✅ Leaves / Board of Guilt channel set to {interaction.channel.mention}.", ephemeral=True)
 
 
+@bot.tree.command(name="setleaveschannel", description="Set this channel as leaves / Board of Guilt channel")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_setleaveschannel(interaction: discord.Interaction) -> None:
+    await set_leaves_guilt_channel_from_interaction(interaction)
+
+
 @bot.tree.command(name="setgulitcategory", description="Set this channel as Board of Guilt/leaves channel")
 @app_commands.checks.has_permissions(administrator=True)
 async def slash_setgulitcategory(interaction: discord.Interaction) -> None:
-    await slash_setleaveschannel(interaction)
+    # Kept for compatibility with the old misspelled slash command.
+    await set_leaves_guilt_channel_from_interaction(interaction)
+
+
+@bot.tree.command(name="setguiltcategory", description="Set this channel as Board of Guilt/leaves channel")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_setguiltcategory(interaction: discord.Interaction) -> None:
+    await set_leaves_guilt_channel_from_interaction(interaction)
 
 
 @bot.tree.command(name="setstaffrole", description="Set the only staff role for XSI")
@@ -4891,4 +4908,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
