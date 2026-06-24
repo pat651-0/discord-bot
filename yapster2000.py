@@ -25,8 +25,8 @@ from discord.ext import commands, tasks
 # python xsi_bot_full_setup_requiredpermissions.py
 # ============================================================
 
-VERSION = "XSI full setup build 2026-06-21 / giveaway-duration-controls-ticketusers"
-BUILD_TAG = "XSI-FORCE-48-GIVEAWAY-DURATION-CONTROLS-TICKETUSERS"
+VERSION = "XSI full setup build 2026-06-23 / configurable-ticket-ui-buttons-custom-messages"
+BUILD_TAG = "XSI-FORCE-50-CUSTOM-TICKET-WELCOME-GUILT-MESSAGES"
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
@@ -61,6 +61,13 @@ DEFAULT_AVAILABLE_START = "9am"
 DEFAULT_AVAILABLE_END = "10pm"
 DEFAULT_WELCOME_MESSAGE = "Hey {user} Please Read The Rules"
 DEFAULT_UNAVAILABLE_MESSAGE = "I am unavailable right now. I will reply when I am back."
+DEFAULT_TICKET_PANEL_TITLE = "🎟️ Open a Ticket"
+DEFAULT_TICKET_OPEN_MESSAGE = "Please explain what you need help with for **{ticket_type}**."
+DEFAULT_WALL_TITLE = "🧱 Wall of Knobs 🧱"
+DEFAULT_WALL_MESSAGE = "Another rule breaker has been added to the wall."
+DEFAULT_GUILT_TITLE = "⚖️ Board of Guilt"
+DEFAULT_GUILT_MESSAGE = "💀 {username} left the server...\n\nTheir name shall stay here forever."
+DEFAULT_GUILT_CONTENT = "bye I guess... {user}"
 
 MAX_WARNINGS = 3
 SPAM_LIMIT = 5
@@ -78,6 +85,9 @@ MAX_GIVEAWAY_SECONDS = 30 * 24 * 60 * 60
 RECORD_CHANNEL_DELETE_AFTER = 60 * 60
 MAX_RECORD_SELECT_OPTIONS = 25
 MAX_RECORD_PREVIEW_CHUNKS = 20
+MAX_TICKET_PANEL_BUTTONS = 5
+DEFAULT_TICKET_BUTTON_LABEL = "🎟️ Open Ticket"
+TICKET_PANEL_CUSTOM_ID_PREFIX = "xsi_ticket_panel_button_"
 
 # Optional: put your Discord user ID here if you want your ticket replies to DM ticket owners.
 OWNER_USER_IDS = [1137385938155221073]
@@ -231,6 +241,10 @@ intents.guilds = True
 intents.members = True
 intents.reactions = True
 
+# Custom message commands are admin-only. These mentions are allowed so admins can
+# intentionally use @user, @role, and @everyone in their own saved bot messages.
+CUSTOM_ALLOWED_MENTIONS = discord.AllowedMentions(everyone=True, users=True, roles=True)
+
 
 # ---------------- JSON HELPERS ----------------
 def _copy_default(default: Any) -> Any:
@@ -317,6 +331,7 @@ class XSIBot(commands.Bot):
     async def setup_hook(self) -> None:
         self.add_view(TicketsButton())
         self.add_view(Tickets2Button())
+        self.add_view(TicketPanelView(persistent=True))
         self.add_view(CloseButton())
         self.add_view(RecordCloseButton())
         if not availability_refresher.is_running():
@@ -335,17 +350,38 @@ smart_cooldowns: dict[str, float] = {}
 # ============================================================
 # CONFIG HELPERS
 # ============================================================
+def default_ticket_buttons() -> list[dict[str, Any]]:
+    return [
+        {
+            "label": DEFAULT_TICKET_BUTTON_LABEL,
+            "style": "green",
+            "auto_messages": True,
+        }
+    ]
+
+
 def default_guild_config() -> dict[str, Any]:
     return {
         "staff_role_ids": [],
         "ticket_category_id": None,
         "ticket_panel_channel_id": None,
         "ticket_panel_message_id": None,
+        "ticket_buttons": default_ticket_buttons(),
+        "ticket_panel_title": None,
+        "ticket_panel_message": None,
+        "ticket_open_title": None,
+        "ticket_open_message": None,
         "welcome_channel_id": None,
         "welcome_message": DEFAULT_WELCOME_MESSAGE,
         "wall_channel_id": None,
+        "wall_title": DEFAULT_WALL_TITLE,
+        "wall_message": DEFAULT_WALL_MESSAGE,
+        "wall_content": None,
         "leaves_channel_id": None,
         "guilt_channel_id": None,
+        "guilt_title": DEFAULT_GUILT_TITLE,
+        "guilt_message": DEFAULT_GUILT_MESSAGE,
+        "guilt_content": DEFAULT_GUILT_CONTENT,
         "transcript_channel_id": None,
         "record_category_id": None,
         "record_channel_id": None,
@@ -390,6 +426,10 @@ def ensure_guild_config(guild_id: int) -> dict[str, Any]:
 
     if not isinstance(data.get("created_channel_ids"), list):
         data["created_channel_ids"] = []
+        changed = True
+
+    if not isinstance(data.get("ticket_buttons"), list):
+        data["ticket_buttons"] = default_ticket_buttons()
         changed = True
 
     if not isinstance(data.get("availability"), dict):
@@ -494,6 +534,88 @@ def format_mentions_safe(text: str, member: discord.Member | discord.User, guild
         .replace("{username}", member.name)
         .replace("{display_name}", display_name)
         .replace("{server}", server_name)
+    )
+
+
+def truncate_discord_text(text: Any, limit: int, fallback: str = "-") -> str:
+    value = str(text if text is not None else "").strip()
+    if not value:
+        value = fallback
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 3)] + "..."
+
+
+def render_custom_message(
+    template: Any,
+    *,
+    member: discord.Member | discord.User | None = None,
+    guild: discord.Guild | None = None,
+    ticket_type: str | None = None,
+    channel: discord.TextChannel | None = None,
+    offence: str | None = None,
+    punishment: str | None = None,
+    warning_count: int | None = None,
+    moderator: discord.Member | discord.User | None = None,
+    message_content: str | None = None,
+    availability_line: str | None = None,
+) -> str:
+    """Render admin-configured text.
+
+    Supported placeholders:
+    {user}, {username}, {display_name}, {user_id}, {server}, {ticket_type},
+    {channel}, {channel_id}, {offence}, {reason}, {punishment}, {warnings},
+    {max_warnings}, {moderator}, {moderator_name}, {message}, {availability},
+    {date}, and {time}.
+    """
+    text = str(template if template is not None else "")
+    if guild is None and isinstance(member, discord.Member):
+        guild = member.guild
+
+    now = datetime.now(UK_TIMEZONE)
+    member_name = getattr(member, "name", "") if member is not None else ""
+    display_name = getattr(member, "display_name", member_name) if member is not None else ""
+    user_mention = getattr(member, "mention", "") if member is not None else ""
+    user_id = str(getattr(member, "id", "")) if member is not None else ""
+    moderator_name = getattr(moderator, "name", "") if moderator is not None else ""
+    moderator_mention = getattr(moderator, "mention", moderator_name) if moderator is not None else ""
+
+    replacements = {
+        "{user}": user_mention,
+        "{member}": user_mention,
+        "{target}": user_mention,
+        "{username}": member_name,
+        "{display_name}": display_name,
+        "{user_id}": user_id,
+        "{server}": guild.name if guild is not None else "this server",
+        "{ticket_type}": str(ticket_type or "Ticket"),
+        "{button}": str(ticket_type or "Ticket"),
+        "{channel}": channel.mention if channel is not None else "",
+        "{channel_id}": str(channel.id) if channel is not None else "",
+        "{offence}": str(offence or ""),
+        "{reason}": str(offence or ""),
+        "{punishment}": str(punishment or ""),
+        "{warnings}": str(warning_count if warning_count is not None else ""),
+        "{max_warnings}": str(MAX_WARNINGS),
+        "{moderator}": moderator_mention,
+        "{moderator_name}": moderator_name,
+        "{message}": str(message_content or ""),
+        "{availability}": str(availability_line or ""),
+        "{date}": now.strftime("%Y-%m-%d"),
+        "{time}": now.strftime("%-I:%M%p").lower(),
+    }
+
+    for key, value in replacements.items():
+        text = text.replace(key, value)
+    return text
+
+
+def custom_message_help_text() -> str:
+    return (
+        "Placeholders: `{user}`, `{username}`, `{display_name}`, `{server}`, "
+        "`{ticket_type}`, `{channel}`, `{offence}`, `{punishment}`, `{warnings}`, "
+        "`{moderator}`, `{message}`, `{availability}`. Mentions like @users, "
+        "@roles, and @everyone are allowed in saved custom messages."
     )
 
 
@@ -762,9 +884,22 @@ async def send_wall_log(
     if channel is None:
         return
 
+    title = truncate_discord_text(config.get("wall_title") or DEFAULT_WALL_TITLE, 256, DEFAULT_WALL_TITLE)
+    description_template = config.get("wall_message") or DEFAULT_WALL_MESSAGE
+    description = render_custom_message(
+        description_template,
+        member=member,
+        guild=member.guild,
+        offence=offence,
+        punishment=punishment,
+        warning_count=warning_count,
+        moderator=moderator,
+        message_content=message_content,
+    )
+
     embed = discord.Embed(
-        title="🧱 Wall of Knobs 🧱",
-        description="Another rule breaker has been added to the wall.",
+        title=title,
+        description=truncate_discord_text(description, 4096, DEFAULT_WALL_MESSAGE),
         color=discord.Color.red(),
     )
     embed.add_field(name="Their @", value=member.mention, inline=False)
@@ -783,7 +918,18 @@ async def send_wall_log(
         embed.add_field(name="Message", value=safe_message or "*No text content*", inline=False)
 
     embed.set_thumbnail(url=member.display_avatar.url)
-    await channel.send(embed=embed)
+    content_template = str(config.get("wall_content") or "").strip()
+    content = render_custom_message(
+        content_template,
+        member=member,
+        guild=member.guild,
+        offence=offence,
+        punishment=punishment,
+        warning_count=warning_count,
+        moderator=moderator,
+        message_content=message_content,
+    ) if content_template else None
+    await channel.send(content=content, embed=embed, allowed_mentions=CUSTOM_ALLOWED_MENTIONS)
 
 
 async def punish_if_needed(
@@ -1120,7 +1266,13 @@ def _append_record_event_unlocked(
     events.append(event)
 
 
-async def create_ticket_record(channel: discord.TextChannel, owner: discord.Member | discord.User, auto_messages: bool) -> str:
+async def create_ticket_record(
+    channel: discord.TextChannel,
+    owner: discord.Member | discord.User,
+    auto_messages: bool,
+    ticket_type: str = "Ticket",
+    button_index: int | None = None,
+) -> str:
     async with record_lock:
         bucket = _record_bucket(channel.guild.id)
         record_id = _new_record_id(bucket)
@@ -1138,6 +1290,8 @@ async def create_ticket_record(channel: discord.TextChannel, owner: discord.Memb
             "close_reason": None,
             "status": "open",
             "auto_messages": bool(auto_messages),
+            "ticket_type": ticket_type,
+            "button_index": button_index,
             "claimed_by": None,
             "messages": [],
             "events": [],
@@ -1145,7 +1299,7 @@ async def create_ticket_record(channel: discord.TextChannel, owner: discord.Memb
         _append_record_event_unlocked(
             record,
             "ticket_opened",
-            f"Ticket opened by {owner}.",
+            f"{ticket_type} ticket opened by {owner}.",
             actor=owner,
             extra={"channel_id": channel.id, "channel_name": channel.name},
         )
@@ -1193,6 +1347,8 @@ async def get_or_create_ticket_record_for_channel(channel: discord.TextChannel, 
             "close_reason": None,
             "status": "open",
             "auto_messages": bool(data.get("auto_messages", False)),
+            "ticket_type": str(data.get("ticket_type") or "Ticket"),
+            "button_index": data.get("button_index"),
             "claimed_by": data.get("claimed_by"),
             "messages": [],
             "events": [],
@@ -1344,6 +1500,8 @@ def build_ticket_record_transcript(record: dict[str, Any]) -> str:
     lines.append(f"XSI Ticket Record #{record.get('record_id', 'Unknown')}")
     lines.append("=" * 60)
     lines.append(f"Owner: {owner_text}")
+    if record.get("ticket_type"):
+        lines.append(f"Ticket Type: {record.get('ticket_type')}")
     lines.append(f"Status: {str(record.get('status') or 'unknown').title()}")
     lines.append(f"Original Channel: #{record.get('channel_name', 'unknown')} ({record.get('channel_id', 'unknown')})")
     lines.append(f"Created: {_record_datetime_text(record.get('created_at'))}")
@@ -1526,6 +1684,7 @@ async def create_record_review_channel(
         title=f"📁 Ticket Record #{record_id}",
         description=(
             f"Owner: {owner_text}\n"
+            f"Type: **{str(record.get('ticket_type') or 'Ticket')}**\n"
             f"Status: **{str(record.get('status') or 'unknown').title()}**\n"
             f"Created: `{_record_datetime_text(record.get('created_at'))}`\n"
             f"Original Channel: `#{record.get('channel_name', 'unknown')}`\n\n"
@@ -1574,21 +1733,162 @@ async def send_record_picker_response(
     )
 
 
+def normalize_ticket_button_label(label: Any) -> str:
+    clean_label = re.sub(r"\s+", " ", str(label or "")).strip()
+    return clean_label[:80]
+
+
+def get_ticket_button_configs(config: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_buttons = config.get("ticket_buttons")
+    buttons: list[dict[str, Any]] = []
+
+    if isinstance(raw_buttons, list):
+        for item in raw_buttons[:MAX_TICKET_PANEL_BUTTONS]:
+            if isinstance(item, dict):
+                label = normalize_ticket_button_label(item.get("label"))
+                style = str(item.get("style") or "green").lower().strip()
+                auto_messages = bool(item.get("auto_messages", True))
+            else:
+                label = normalize_ticket_button_label(item)
+                style = "green"
+                auto_messages = True
+
+            if not label:
+                continue
+
+            buttons.append(
+                {
+                    "label": label,
+                    "style": style,
+                    "auto_messages": auto_messages,
+                }
+            )
+
+    return buttons or default_ticket_buttons()
+
+
+def get_ticket_button_config_for_index(guild_id: int, index: int) -> dict[str, Any] | None:
+    if index < 1 or index > MAX_TICKET_PANEL_BUTTONS:
+        return None
+    buttons = get_ticket_button_configs(guild_config(guild_id))
+    if index > len(buttons):
+        return None
+    return buttons[index - 1]
+
+
+def ticket_button_style(style_name: str) -> discord.ButtonStyle:
+    styles = {
+        "green": discord.ButtonStyle.green,
+        "success": discord.ButtonStyle.green,
+        "grey": discord.ButtonStyle.grey,
+        "gray": discord.ButtonStyle.grey,
+        "secondary": discord.ButtonStyle.grey,
+        "blue": discord.ButtonStyle.blurple,
+        "blurple": discord.ButtonStyle.blurple,
+        "primary": discord.ButtonStyle.blurple,
+        "red": discord.ButtonStyle.red,
+        "danger": discord.ButtonStyle.red,
+    }
+    return styles.get(str(style_name or "green").lower().strip(), discord.ButtonStyle.green)
+
+
+def build_ticket_panel_view(guild_id: int) -> discord.ui.View:
+    return TicketPanelView(buttons=get_ticket_button_configs(guild_config(guild_id)))
+
+
+def parse_ticket_button_labels(raw: str) -> list[str]:
+    text = str(raw or "").strip()
+    if not text:
+        return []
+
+    marker_pattern = re.compile(r"(?:^|\s)/?button[\s_-]*(\d{1,2})\s*[:=\-]?\s*", re.IGNORECASE)
+    matches = list(marker_pattern.finditer(text))
+    if matches:
+        by_index: dict[int, str] = {}
+        for position, match in enumerate(matches):
+            index = int(match.group(1))
+            start = match.end()
+            end = matches[position + 1].start() if position + 1 < len(matches) else len(text)
+            label = normalize_ticket_button_label(text[start:end])
+            if 1 <= index <= MAX_TICKET_PANEL_BUTTONS and label:
+                by_index[index] = label
+        return [by_index[index] for index in sorted(by_index)]
+
+    split_parts = re.split(r"\s*(?:\||;|\n)\s*", text)
+    return [normalize_ticket_button_label(part) for part in split_parts if normalize_ticket_button_label(part)][:MAX_TICKET_PANEL_BUTTONS]
+
+
+def format_ticket_buttons_for_reply(buttons: list[dict[str, Any]]) -> str:
+    return "\n".join(f"Button {index}: **{button['label']}**" for index, button in enumerate(buttons, start=1))
+
+
+async def apply_ticket_button_labels(
+    guild: discord.Guild,
+    source_channel: discord.TextChannel | None,
+    labels: list[str],
+) -> tuple[bool, str]:
+    clean_labels = [normalize_ticket_button_label(label) for label in labels]
+    clean_labels = [label for label in clean_labels if label][:MAX_TICKET_PANEL_BUTTONS]
+
+    if not clean_labels:
+        return False, (
+            "❌ Add at least one button label. Example: "
+            "`!changeticketui Support | Buy Something | Report Issue`"
+        )
+
+    config = guild_config(guild.id)
+    config["ticket_buttons"] = [
+        {"label": label, "style": "green", "auto_messages": True}
+        for label in clean_labels
+    ]
+
+    panel_channel = await get_text_channel(guild, config.get("ticket_panel_channel_id"))
+    force_new = False
+    if panel_channel is None and source_channel is not None:
+        panel_channel = source_channel
+        config["ticket_panel_channel_id"] = source_channel.id
+        config["ticket_panel_message_id"] = None
+        force_new = True
+
+    await save_server_settings()
+    message = await send_or_update_ticket_panel(guild, panel_channel, force_new=force_new)
+
+    buttons = get_ticket_button_configs(config)
+    summary = format_ticket_buttons_for_reply(buttons)
+    if message is None:
+        return False, f"⚠️ Ticket buttons saved, but no ticket panel channel is set. Run `/tickets` or `!tickets`.\n{summary}"
+    return True, f"✅ Ticket UI updated with {len(buttons)} button(s).\n{summary}"
+
+
 def ticket_panel_embed(guild_id: int, normal: bool = True) -> discord.Embed:
+    config = guild_config(guild_id)
     state = get_availability_state(guild_id)
     color = discord.Color.green() if state["available"] else discord.Color.orange()
+    availability_text = state["panel_line"]
+    if not state["available"]:
+        availability_text += f"\n\n⚠️ {state['title']}: {state['message']}"
 
     if normal:
-        title = "🎟️ Open a Ticket"
-        description = "Click the button below to open a ticket.\n\n" + state["panel_line"]
+        custom_title = str(config.get("ticket_panel_title") or "").strip()
+        custom_message = str(config.get("ticket_panel_message") or "").strip()
+        title = truncate_discord_text(custom_title or DEFAULT_TICKET_PANEL_TITLE, 256, DEFAULT_TICKET_PANEL_TITLE)
+        if custom_message:
+            description = render_custom_message(
+                custom_message,
+                guild=bot.get_guild(guild_id),
+                availability_line=availability_text,
+            )
+        else:
+            button_count = len(get_ticket_button_configs(config))
+            click_text = "Click a button below to open the right ticket." if button_count > 1 else "Click the button below to open a ticket."
+            description = click_text + "\n\n" + state["panel_line"]
+            if not state["available"]:
+                description += f"\n\n⚠️ {state['title']}: {state['message']}"
     else:
         title = "🎫 Open a Ticket"
         description = "Click the button below to create a ticket."
 
-    if not state["available"] and normal:
-        description += f"\n\n⚠️ {state['title']}: {state['message']}"
-
-    return discord.Embed(title=title, description=description, color=color)
+    return discord.Embed(title=title, description=truncate_discord_text(description, 4096, "Open a ticket."), color=color)
 
 
 async def send_or_update_ticket_panel(
@@ -1606,26 +1906,33 @@ async def send_or_update_ticket_panel(
         return None
 
     embed = ticket_panel_embed(guild.id, normal=True)
+    view = build_ticket_panel_view(guild.id)
     message_id = config.get("ticket_panel_message_id")
 
     if message_id and not force_new:
         try:
             message = await channel.fetch_message(int(message_id))
-            await message.edit(embed=embed, view=TicketsButton())
+            await message.edit(embed=embed, view=view, allowed_mentions=CUSTOM_ALLOWED_MENTIONS)
             return message
         except discord.HTTPException:
             pass
 
-    message = await channel.send(embed=embed, view=TicketsButton())
+    message = await channel.send(embed=embed, view=view, allowed_mentions=CUSTOM_ALLOWED_MENTIONS)
     config["ticket_panel_channel_id"] = channel.id
     config["ticket_panel_message_id"] = message.id
     await save_server_settings()
     return message
 
 
-async def create_ticket_channel(interaction: discord.Interaction, auto_messages: bool) -> None:
+async def create_ticket_channel(
+    interaction: discord.Interaction,
+    auto_messages: bool,
+    ticket_type: str = "Ticket",
+    button_index: int | None = None,
+) -> None:
     guild = interaction.guild
     user = interaction.user
+    ticket_type = normalize_ticket_button_label(ticket_type) or "Ticket"
 
     if guild is None:
         await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
@@ -1673,7 +1980,12 @@ async def create_ticket_channel(interaction: discord.Interaction, auto_messages:
             attach_files=True,
         )
 
-    channel_name = f"ticket-{clean_channel_name(user.name)}-{str(user.id)[-4:]}"
+    type_slug = clean_channel_name(ticket_type)
+    user_slug = clean_channel_name(user.name)
+    if button_index is not None and type_slug not in {"ticket", "open-ticket"}:
+        channel_name = f"ticket-{type_slug}-{user_slug}-{str(user.id)[-4:]}"[:90]
+    else:
+        channel_name = f"ticket-{user_slug}-{str(user.id)[-4:]}"
 
     try:
         channel = await guild.create_text_channel(
@@ -1690,7 +2002,7 @@ async def create_ticket_channel(interaction: discord.Interaction, auto_messages:
         await interaction.followup.send("❌ Discord rejected the ticket channel creation. Check permissions/category limits.")
         return
 
-    record_id = await create_ticket_record(channel, user, auto_messages)
+    record_id = await create_ticket_record(channel, user, auto_messages, ticket_type=ticket_type, button_index=button_index)
 
     async with tickets_lock:
         ticket_owners[str(channel.id)] = {
@@ -1699,6 +2011,8 @@ async def create_ticket_channel(interaction: discord.Interaction, auto_messages:
             "last_dm_time": 0,
             "last_away_reply_time": 0,
             "auto_messages": auto_messages,
+            "ticket_type": ticket_type,
+            "button_index": button_index,
             "created_at": int(time.time()),
             "claimed_by": None,
             "record_id": record_id,
@@ -1706,26 +2020,55 @@ async def create_ticket_channel(interaction: discord.Interaction, auto_messages:
         await save_ticket_owners()
 
     state = get_availability_state(guild.id)
-    if auto_messages:
-        description = "Please explain what you need help with.\n\n" + state["panel_line"]
-        if not state["available"]:
-            description += f"\n\n⚠️ {state['title']}: {state['message']}"
-        ticket_embed = discord.Embed(title="🎟️ Ticket Opened", description=description, color=discord.Color.green())
-    else:
-        ticket_embed = discord.Embed(
-            title="🎫 Ticket Opened",
-            description="Please explain what you need help with.",
-            color=discord.Color.green(),
+    availability_text = state["panel_line"]
+    if not state["available"]:
+        availability_text += f"\n\n⚠️ {state['title']}: {state['message']}"
+
+    config = guild_config(guild.id)
+    custom_open_message = str(config.get("ticket_open_message") or "").strip()
+    custom_open_title = str(config.get("ticket_open_title") or "").strip()
+    default_open_message = DEFAULT_TICKET_OPEN_MESSAGE
+
+    if custom_open_message:
+        description = render_custom_message(
+            custom_open_message,
+            member=user,
+            guild=guild,
+            ticket_type=ticket_type,
+            channel=channel,
+            availability_line=availability_text,
         )
+        if not auto_messages and "{availability}" not in custom_open_message:
+            description = description.strip()
+    else:
+        description = render_custom_message(default_open_message, member=user, guild=guild, ticket_type=ticket_type, channel=channel)
+        if auto_messages:
+            description += "\n\n" + availability_text
+
+    default_title = f"🎟️ {ticket_type} Ticket Opened" if auto_messages else f"🎫 {ticket_type} Ticket Opened"
+    title = render_custom_message(
+        custom_open_title or default_title,
+        member=user,
+        guild=guild,
+        ticket_type=ticket_type,
+        channel=channel,
+        availability_line=availability_text,
+    )
+    ticket_embed = discord.Embed(
+        title=truncate_discord_text(title, 256, default_title),
+        description=truncate_discord_text(description, 4096, DEFAULT_TICKET_OPEN_MESSAGE),
+        color=discord.Color.green(),
+    )
 
     ticket_embed.add_field(name="Opened By", value=user.mention, inline=True)
+    ticket_embed.add_field(name="Ticket Type", value=ticket_type, inline=True)
     ticket_embed.add_field(name="Status", value="Open", inline=True)
     ticket_embed.add_field(name="Claimed By", value="Not claimed", inline=True)
 
-    await channel.send(content=user.mention, embed=ticket_embed, view=CloseButton())
+    await channel.send(content=user.mention, embed=ticket_embed, view=CloseButton(), allowed_mentions=CUSTOM_ALLOWED_MENTIONS)
 
     try:
-        await user.send(f"🎫 Your ticket has been created in {guild.name}.\nTicket: {channel.mention}")
+        await user.send(f"🎫 Your {ticket_type} ticket has been created in {guild.name}.\nTicket: {channel.mention}")
     except discord.HTTPException:
         pass
 
@@ -1958,13 +2301,57 @@ class RecordPickerView(discord.ui.View):
         self.add_item(RecordTicketSelect(records))
 
 
+class TicketPanelButton(discord.ui.Button):
+    def __init__(self, index: int, config: dict[str, Any] | None = None) -> None:
+        self.index = index
+        config = config or {"label": f"Ticket {index}", "style": "green", "auto_messages": True}
+        super().__init__(
+            label=normalize_ticket_button_label(config.get("label")) or f"Ticket {index}",
+            style=ticket_button_style(str(config.get("style") or "green")),
+            custom_id=f"{TICKET_PANEL_CUSTOM_ID_PREFIX}{index}",
+            row=(index - 1) // 5,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+            return
+
+        config = get_ticket_button_config_for_index(interaction.guild.id, self.index)
+        if config is None:
+            await interaction.response.send_message(
+                "❌ That ticket button is not configured anymore. Ask an admin to refresh the ticket panel.",
+                ephemeral=True,
+            )
+            return
+
+        await create_ticket_channel(
+            interaction,
+            auto_messages=bool(config.get("auto_messages", True)),
+            ticket_type=str(config.get("label") or "Ticket"),
+            button_index=self.index,
+        )
+
+
+class TicketPanelView(discord.ui.View):
+    def __init__(self, buttons: list[dict[str, Any]] | None = None, *, persistent: bool = False) -> None:
+        super().__init__(timeout=None)
+        if persistent:
+            buttons_to_register = [None] * MAX_TICKET_PANEL_BUTTONS
+        else:
+            buttons_to_register = (buttons or default_ticket_buttons())[:MAX_TICKET_PANEL_BUTTONS]
+
+        for index, config in enumerate(buttons_to_register, start=1):
+            self.add_item(TicketPanelButton(index, config))
+
+
 class TicketsButton(discord.ui.View):
     def __init__(self) -> None:
         super().__init__(timeout=None)
 
     @discord.ui.button(label="🎟️ Open Ticket", style=discord.ButtonStyle.green, custom_id="xsi_create_ticket_auto")
     async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await create_ticket_channel(interaction, auto_messages=True)
+        await create_ticket_channel(interaction, auto_messages=True, ticket_type="Ticket")
 
 
 class Tickets2Button(discord.ui.View):
@@ -1973,7 +2360,7 @@ class Tickets2Button(discord.ui.View):
 
     @discord.ui.button(label="🎫 Create Ticket", style=discord.ButtonStyle.green, custom_id="xsi_create_ticket_basic")
     async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await create_ticket_channel(interaction, auto_messages=False)
+        await create_ticket_channel(interaction, auto_messages=False, ticket_type="Ticket")
 
 
 # ============================================================
@@ -3065,9 +3452,9 @@ async def on_member_join(member: discord.Member) -> None:
         return
 
     welcome_text = str(config.get("welcome_message") or DEFAULT_WELCOME_MESSAGE)
-    message = format_mentions_safe(welcome_text, member, member.guild)
+    message = render_custom_message(welcome_text, member=member, guild=member.guild)
     try:
-        await channel.send(message, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+        await channel.send(message, allowed_mentions=CUSTOM_ALLOWED_MENTIONS)
     except discord.HTTPException:
         pass
 
@@ -3079,9 +3466,15 @@ async def on_member_remove(member: discord.Member) -> None:
     if channel is None:
         return
 
+    title = truncate_discord_text(config.get("guilt_title") or DEFAULT_GUILT_TITLE, 256, DEFAULT_GUILT_TITLE)
+    description = render_custom_message(
+        config.get("guilt_message") or DEFAULT_GUILT_MESSAGE,
+        member=member,
+        guild=member.guild,
+    )
     embed = discord.Embed(
-        title="⚖️ Board of Guilt",
-        description=f"💀 {member.name} left the server...\n\nTheir name shall stay here forever.",
+        title=title,
+        description=truncate_discord_text(description, 4096, DEFAULT_GUILT_MESSAGE),
         color=discord.Color.red(),
     )
     embed.add_field(name="Username", value=member.name, inline=True)
@@ -3089,8 +3482,10 @@ async def on_member_remove(member: discord.Member) -> None:
     embed.add_field(name="User ID", value=str(member.id), inline=False)
     embed.set_thumbnail(url=member.display_avatar.url)
 
+    content_template = str(config.get("guilt_content") or DEFAULT_GUILT_CONTENT).strip()
+    content = render_custom_message(content_template, member=member, guild=member.guild) if content_template else None
     try:
-        await channel.send(content=f"bye I guess... <@{member.id}>", embed=embed)
+        await channel.send(content=content, embed=embed, allowed_mentions=CUSTOM_ALLOWED_MENTIONS)
     except discord.HTTPException:
         pass
 
@@ -3159,7 +3554,11 @@ async def version_cmd(ctx: commands.Context) -> None:
 @bot.command(name="buildcheck", aliases=["commandcount", "slashcount"])
 async def buildcheck_cmd(ctx: commands.Context) -> None:
     names = sorted(command.name for command in bot.tree.get_commands())
-    critical = ["clearsetup", "setunavailable", "refreshticketpanel", "setavailability", "availability", "clearunavailable", "record", "setrecordcategory", "setrecordchannel"]
+    critical = [
+        "clearsetup", "setunavailable", "refreshticketpanel", "changeticketui",
+        "customwelcome", "customticketmessage", "customticketopenmessage", "customguilt",
+        "setavailability", "availability", "clearunavailable", "record", "setrecordcategory", "setrecordchannel"
+    ]
     missing = [name for name in critical if name not in names]
     missing_text = ", ".join(missing) if missing else "None"
     await ctx.send(
@@ -3297,6 +3696,121 @@ async def setwelcome(ctx: commands.Context, *, message: str = DEFAULT_WELCOME_ME
     config["welcome_message"] = message
     await save_server_settings()
     await ctx.send(f"✅ Welcome channel set to {ctx.channel.mention}. Message: `{message}`")
+
+
+
+@bot.command(name="customwelcome", aliases=["welcomecustom", "customwelcomemessage"])
+@commands.has_permissions(administrator=True)
+async def customwelcome_prefix(ctx: commands.Context, *, message: str) -> None:
+    if ctx.guild is None or not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("❌ This command only works inside a server text channel.")
+        return
+    config = guild_config(ctx.guild.id)
+    config["welcome_channel_id"] = ctx.channel.id
+    config["welcome_message"] = message
+    await save_server_settings()
+    await ctx.send(
+        f"✅ Custom welcome saved for {ctx.channel.mention}.\n{custom_message_help_text()}",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@bot.command(name="customticketmessage", aliases=["customticketpanel", "customticketmsg", "ticketmessage"])
+@commands.has_permissions(administrator=True)
+async def customticketmessage_prefix(ctx: commands.Context, *, message: str) -> None:
+    if ctx.guild is None or not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("❌ This command only works inside a server text channel.")
+        return
+    config = guild_config(ctx.guild.id)
+    config["ticket_panel_message"] = message
+    force_new = False
+    panel_channel = await get_text_channel(ctx.guild, config.get("ticket_panel_channel_id"))
+    if panel_channel is None:
+        panel_channel = ctx.channel
+        config["ticket_panel_channel_id"] = ctx.channel.id
+        config["ticket_panel_message_id"] = None
+        force_new = True
+    await save_server_settings()
+    panel_message = await send_or_update_ticket_panel(ctx.guild, panel_channel, force_new=force_new)
+    status = "and the ticket panel was refreshed" if panel_message else "but I could not refresh the panel"
+    await ctx.send(
+        f"✅ Custom ticket panel message saved {status}. Use `{{availability}}` to show times/status.",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@bot.command(name="customticketopenmessage", aliases=["customticketopened", "ticketopenmessage"])
+@commands.has_permissions(administrator=True)
+async def customticketopenmessage_prefix(ctx: commands.Context, *, message: str) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    config = guild_config(ctx.guild.id)
+    config["ticket_open_message"] = message
+    await save_server_settings()
+    await ctx.send(
+        "✅ Custom new-ticket message saved. Use `{ticket_type}`, `{user}`, `{channel}`, and `{availability}`.",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@bot.command(name="customguilt", aliases=["customgulit", "customboardofguilt", "customleave", "customleaves"])
+@commands.has_permissions(administrator=True)
+async def customguilt_prefix(ctx: commands.Context, *, message: str) -> None:
+    if ctx.guild is None or not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("❌ This command only works inside a server text channel.")
+        return
+    config = guild_config(ctx.guild.id)
+    config["guilt_message"] = message
+    if not config.get("leaves_channel_id") and not config.get("guilt_channel_id"):
+        config["leaves_channel_id"] = ctx.channel.id
+        config["guilt_channel_id"] = ctx.channel.id
+    await save_server_settings()
+    await ctx.send(
+        f"✅ Custom Board of Guilt/leaves message saved.\n{custom_message_help_text()}",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@bot.command(name="customwall", aliases=["customwallofknobs", "customwarninglog"])
+@commands.has_permissions(administrator=True)
+async def customwall_prefix(ctx: commands.Context, *, message: str) -> None:
+    if ctx.guild is None or not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("❌ This command only works inside a server text channel.")
+        return
+    config = guild_config(ctx.guild.id)
+    config["wall_message"] = message
+    if not config.get("wall_channel_id"):
+        config["wall_channel_id"] = ctx.channel.id
+    await save_server_settings()
+    await ctx.send(
+        f"✅ Custom Wall of Knobs message saved.\n{custom_message_help_text()}",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@bot.command(name="resetcustommessages", aliases=["resetcustoms", "resetcustommessage"])
+@commands.has_permissions(administrator=True)
+async def resetcustommessages_prefix(ctx: commands.Context) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    config = guild_config(ctx.guild.id)
+    config["welcome_message"] = DEFAULT_WELCOME_MESSAGE
+    config["ticket_panel_title"] = None
+    config["ticket_panel_message"] = None
+    config["ticket_open_title"] = None
+    config["ticket_open_message"] = None
+    config["wall_title"] = DEFAULT_WALL_TITLE
+    config["wall_message"] = DEFAULT_WALL_MESSAGE
+    config["wall_content"] = None
+    config["guilt_title"] = DEFAULT_GUILT_TITLE
+    config["guilt_message"] = DEFAULT_GUILT_MESSAGE
+    config["guilt_content"] = DEFAULT_GUILT_CONTENT
+    await save_server_settings()
+    if isinstance(ctx.channel, discord.TextChannel):
+        await send_or_update_ticket_panel(ctx.guild)
+    await ctx.send("✅ Custom messages reset to defaults.", allowed_mentions=discord.AllowedMentions.none())
 
 
 @bot.command(name="setwallchannel")
@@ -3458,6 +3972,36 @@ async def refreshticketpanel_prefix(ctx: commands.Context) -> None:
         return
     message = await send_or_update_ticket_panel(ctx.guild)
     await ctx.send("✅ Ticket panel refreshed." if message else "❌ Ticket panel channel is not set. Run `/setup` or `/tickets`.")
+
+
+@bot.command(name="changeticketui", aliases=["ticketui", "ticketbuttons"])
+@commands.has_permissions(administrator=True)
+async def changeticketui_prefix(ctx: commands.Context, *, buttons: str = "") -> None:
+    if ctx.guild is None or not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("❌ This command only works inside a server text channel.")
+        return
+
+    labels = parse_ticket_button_labels(buttons)
+    if not labels:
+        await ctx.send(
+            "❌ Give me the button labels. Examples:\n"
+            "`!changeticketui Support | Buy Something | Report Issue`\n"
+            "`!changeticketui /button 1 Support /button 2 Buy Something /button 3 Report Issue`"
+        )
+        return
+
+    _, reply = await apply_ticket_button_labels(ctx.guild, ctx.channel, labels)
+    await ctx.send(reply, allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.command(name="resetticketui", aliases=["clearticketui", "resetticketbuttons"])
+@commands.has_permissions(administrator=True)
+async def resetticketui_prefix(ctx: commands.Context) -> None:
+    if ctx.guild is None or not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("❌ This command only works inside a server text channel.")
+        return
+    _, reply = await apply_ticket_button_labels(ctx.guild, ctx.channel, [DEFAULT_TICKET_BUTTON_LABEL])
+    await ctx.send(reply, allowed_mentions=discord.AllowedMentions.none())
 
 
 # ============================================================
@@ -3986,7 +4530,11 @@ async def slash_version(interaction: discord.Interaction) -> None:
 @bot.tree.command(name="buildcheck", description="Show XSI build and slash-command diagnostics")
 async def slash_buildcheck(interaction: discord.Interaction) -> None:
     names = sorted(command.name for command in bot.tree.get_commands())
-    critical = ["clearsetup", "setunavailable", "refreshticketpanel", "setavailability", "availability", "clearunavailable", "record", "setrecordcategory", "setrecordchannel"]
+    critical = [
+        "clearsetup", "setunavailable", "refreshticketpanel", "changeticketui",
+        "customwelcome", "customticketmessage", "customticketopenmessage", "customguilt",
+        "setavailability", "availability", "clearunavailable", "record", "setrecordcategory", "setrecordchannel"
+    ]
     missing = [name for name in critical if name not in names]
     missing_text = ", ".join(missing) if missing else "None"
     await interaction.response.send_message(
@@ -4130,6 +4678,219 @@ async def slash_setwelcome(interaction: discord.Interaction, message: str = DEFA
     config["welcome_message"] = message
     await save_server_settings()
     await interaction.response.send_message(f"✅ Welcome channel set to {interaction.channel.mention}.", ephemeral=True)
+
+
+
+@bot.tree.command(name="customwelcome", description="Customize welcome text in this channel")
+@app_commands.describe(
+    message="Welcome text. Placeholders and @mentions are allowed.",
+    channel="Optional channel to use instead of this one.",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_customwelcome(
+    interaction: discord.Interaction,
+    message: str,
+    channel: discord.TextChannel | None = None,
+) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    target_channel = channel if channel is not None else interaction.channel
+    if not isinstance(target_channel, discord.TextChannel):
+        await interaction.response.send_message("❌ Pick a server text channel.", ephemeral=True)
+        return
+    config = guild_config(interaction.guild.id)
+    config["welcome_channel_id"] = target_channel.id
+    config["welcome_message"] = message
+    await save_server_settings()
+    await interaction.response.send_message(
+        f"✅ Custom welcome saved for {target_channel.mention}.\n{custom_message_help_text()}",
+        ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@bot.tree.command(name="customticketmessage", description="Customize the ticket panel text")
+@app_commands.describe(
+    message="Text on the ticket panel. Use {availability} for times/status.",
+    title="Optional ticket panel title.",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_customticketmessage(
+    interaction: discord.Interaction,
+    message: str,
+    title: str | None = None,
+) -> None:
+    if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This only works inside a server text channel.", ephemeral=True)
+        return
+    config = guild_config(interaction.guild.id)
+    config["ticket_panel_message"] = message
+    if title is not None:
+        config["ticket_panel_title"] = title
+    force_new = False
+    panel_channel = await get_text_channel(interaction.guild, config.get("ticket_panel_channel_id"))
+    if panel_channel is None:
+        panel_channel = interaction.channel
+        config["ticket_panel_channel_id"] = interaction.channel.id
+        config["ticket_panel_message_id"] = None
+        force_new = True
+    await save_server_settings()
+    panel_message = await send_or_update_ticket_panel(interaction.guild, panel_channel, force_new=force_new)
+    status = "and the ticket panel was refreshed" if panel_message else "but I could not refresh the panel"
+    await interaction.response.send_message(
+        f"✅ Custom ticket panel message saved {status}. Use `{{availability}}` for times/status.",
+        ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@bot.tree.command(name="customticketopenmessage", description="Customize the message inside new tickets")
+@app_commands.describe(
+    message="Text inside a new ticket. Placeholders and @mentions are allowed.",
+    title="Optional new-ticket embed title.",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_customticketopenmessage(
+    interaction: discord.Interaction,
+    message: str,
+    title: str | None = None,
+) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    config = guild_config(interaction.guild.id)
+    config["ticket_open_message"] = message
+    if title is not None:
+        config["ticket_open_title"] = title
+    await save_server_settings()
+    await interaction.response.send_message(
+        "✅ Custom new-ticket message saved. Use `{ticket_type}`, `{user}`, `{channel}`, and `{availability}`.",
+        ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+async def apply_custom_guilt_interaction(
+    interaction: discord.Interaction,
+    message: str,
+    title: str | None,
+    content: str | None,
+    channel: discord.TextChannel | None,
+) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    target_channel = channel if channel is not None else interaction.channel
+    config = guild_config(interaction.guild.id)
+    config["guilt_message"] = message
+    if title is not None:
+        config["guilt_title"] = title
+    if content is not None:
+        config["guilt_content"] = content
+    if isinstance(target_channel, discord.TextChannel) and not config.get("leaves_channel_id") and not config.get("guilt_channel_id"):
+        config["leaves_channel_id"] = target_channel.id
+        config["guilt_channel_id"] = target_channel.id
+    await save_server_settings()
+    await interaction.response.send_message(
+        f"✅ Custom Board of Guilt/leaves message saved.\n{custom_message_help_text()}",
+        ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@bot.tree.command(name="customguilt", description="Customize Board of Guilt/leaves text")
+@app_commands.describe(
+    message="Embed message. Placeholders and @mentions are allowed.",
+    title="Optional embed title.",
+    content="Optional normal message above the embed.",
+    channel="Optional channel if one is not set yet.",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_customguilt(
+    interaction: discord.Interaction,
+    message: str,
+    title: str | None = None,
+    content: str | None = None,
+    channel: discord.TextChannel | None = None,
+) -> None:
+    await apply_custom_guilt_interaction(interaction, message, title, content, channel)
+
+
+@bot.tree.command(name="customgulit", description="Typo alias for /customguilt")
+@app_commands.describe(
+    message="Embed message. Placeholders and @mentions are allowed.",
+    title="Optional embed title.",
+    content="Optional normal message above the embed.",
+    channel="Optional channel if one is not set yet.",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_customgulit(
+    interaction: discord.Interaction,
+    message: str,
+    title: str | None = None,
+    content: str | None = None,
+    channel: discord.TextChannel | None = None,
+) -> None:
+    await apply_custom_guilt_interaction(interaction, message, title, content, channel)
+
+
+@bot.tree.command(name="customwall", description="Customize Wall of Knobs text")
+@app_commands.describe(
+    message="Embed message. Placeholders and @mentions are allowed.",
+    title="Optional embed title.",
+    content="Optional normal message above the embed.",
+    channel="Optional channel if one is not set yet.",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_customwall(
+    interaction: discord.Interaction,
+    message: str,
+    title: str | None = None,
+    content: str | None = None,
+    channel: discord.TextChannel | None = None,
+) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    target_channel = channel if channel is not None else interaction.channel
+    config = guild_config(interaction.guild.id)
+    config["wall_message"] = message
+    if title is not None:
+        config["wall_title"] = title
+    if content is not None:
+        config["wall_content"] = content
+    if isinstance(target_channel, discord.TextChannel) and not config.get("wall_channel_id"):
+        config["wall_channel_id"] = target_channel.id
+    await save_server_settings()
+    await interaction.response.send_message(
+        f"✅ Custom Wall of Knobs message saved.\n{custom_message_help_text()}",
+        ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@bot.tree.command(name="resetcustommessages", description="Reset all custom saved messages")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_resetcustommessages(interaction: discord.Interaction) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    config = guild_config(interaction.guild.id)
+    config["welcome_message"] = DEFAULT_WELCOME_MESSAGE
+    config["ticket_panel_title"] = None
+    config["ticket_panel_message"] = None
+    config["ticket_open_title"] = None
+    config["ticket_open_message"] = None
+    config["wall_title"] = DEFAULT_WALL_TITLE
+    config["wall_message"] = DEFAULT_WALL_MESSAGE
+    config["wall_content"] = None
+    config["guilt_title"] = DEFAULT_GUILT_TITLE
+    config["guilt_message"] = DEFAULT_GUILT_MESSAGE
+    config["guilt_content"] = DEFAULT_GUILT_CONTENT
+    await save_server_settings()
+    await send_or_update_ticket_panel(interaction.guild)
+    await interaction.response.send_message("✅ Custom messages reset to defaults.", ephemeral=True)
 
 
 @bot.tree.command(name="setwallchannel", description="Set this channel as Wall of Knobs log channel")
@@ -4337,6 +5098,44 @@ async def slash_refreshticketpanel(interaction: discord.Interaction) -> None:
         "✅ Ticket panel refreshed." if message else "❌ Ticket panel channel is not set. Run `/setup` or `/tickets`.",
         ephemeral=True,
     )
+
+
+@bot.tree.command(name="changeticketui", description="Change the ticket panel to show up to 5 custom buttons")
+@app_commands.describe(
+    button_1="First ticket button label, e.g. Support",
+    button_2="Second ticket button label",
+    button_3="Third ticket button label",
+    button_4="Fourth ticket button label",
+    button_5="Fifth ticket button label",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_changeticketui(
+    interaction: discord.Interaction,
+    button_1: str,
+    button_2: str = "",
+    button_3: str = "",
+    button_4: str = "",
+    button_5: str = "",
+) -> None:
+    if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This only works inside a server text channel.", ephemeral=True)
+        return
+
+    labels = [button_1, button_2, button_3, button_4, button_5]
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    _, reply = await apply_ticket_button_labels(interaction.guild, interaction.channel, labels)
+    await interaction.followup.send(reply, ephemeral=True)
+
+
+@bot.tree.command(name="resetticketui", description="Reset the ticket panel back to one Open Ticket button")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_resetticketui(interaction: discord.Interaction) -> None:
+    if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This only works inside a server text channel.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    _, reply = await apply_ticket_button_labels(interaction.guild, interaction.channel, [DEFAULT_TICKET_BUTTON_LABEL])
+    await interaction.followup.send(reply, ephemeral=True)
 
 
 @bot.tree.command(name="tickets", description="Post the ticket panel in this channel")
@@ -4875,6 +5674,7 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
             "`!clearsetup delete_created YES`\n"
             "`!setunavailable 3pm 6pm I am unavailable right now.`\n"
             "`!refreshticketpanel`\n"
+            "`!changeticketui Support | Buy Something | Report Issue`\n"
             "`!kick @user reason`\n"
             "`!kick @user --test reason`\n"
             "`!warn @user reason`\n"
@@ -4908,5 +5708,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
