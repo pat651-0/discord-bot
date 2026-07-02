@@ -25,8 +25,8 @@ from discord.ext import commands, tasks
 # python xsi_bot_full_setup_requiredpermissions.py
 # ============================================================
 
-VERSION = "XSI full setup build 2026-07-01 / trade-options-carmeet-gctf-facility"
-BUILD_TAG = "XSI-TRADE-OPTIONS-CARMEET-GCTF-FACILITY"
+VERSION = "XSI full setup build 2026-07-02 / trade-options-carmeet-gctf-facility-psn"
+BUILD_TAG = "XSI-TRADE-OPTIONS-CARMEET-GCTF-FACILITY-PSN"
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
@@ -2588,6 +2588,7 @@ TRADE_METHOD_CARMEET = "Carmeet"
 TRADE_METHOD_GCTF = "GCTF"
 PROOF_METHOD_SERVER = "Server"
 PROOF_METHOD_PHOTOS = "Photos"
+PSN_RE = re.compile(r"^[A-Za-z0-9_-]{3,16}$")
 PHOTO_TIMING_NOW = "Add photos here"
 PHOTO_TIMING_TICKET = "Inside ticket"
 
@@ -2645,6 +2646,14 @@ def extract_server_link(text: str) -> str | None:
     return None
 
 
+def normalize_psn(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or "")).strip()
+
+
+def valid_psn(value: Any) -> bool:
+    return bool(PSN_RE.fullmatch(normalize_psn(value)))
+
+
 async def find_recent_trade_proof(
     channel: discord.TextChannel,
     user_id: int,
@@ -2692,13 +2701,15 @@ def trade_precheck_message(view: "TradePreCheckView") -> str:
         "",
         "Before I create this trade ticket, complete these steps:",
         "1. Pick **how you would like to trade** from the dropdown.",
-        "2. If you pick **GCTF**, choose **where your facility is**.",
-        "3. Pick **Server** or **Photos** for proof.",
-        "4. If you pick **Server**, press **Add server link here** and paste the invite/link.",
-        "5. If you pick **Photos**, choose **Add photos here** or **Inside ticket**.",
-        "6. Press **Create trade ticket**.",
+        "2. Press **Add your PSN** and enter your PlayStation name.",
+        "3. If you pick **GCTF**, choose **where your facility is**.",
+        "4. Pick **Server** or **Photos** for proof.",
+        "5. If you pick **Server**, press **Add server link here** and paste the invite/link.",
+        "6. If you pick **Photos**, choose **Add photos here** or **Inside ticket**.",
+        "7. Press **Create trade ticket**.",
         "",
         f"**Trade option:** `{trade_method}`",
+        f"**PSN:** `{str(view.psn or 'Not added yet').replace('`', "'")}`",
         f"**Facility:** `{facility}`",
         f"**Proof:** `{proof_method}`",
     ]
@@ -2880,6 +2891,52 @@ class AddServerLinkButton(discord.ui.Button):
         await interaction.response.send_modal(ServerLinkModal(parent))
 
 
+class PSNModal(discord.ui.Modal, title="Add your PSN"):
+    psn = discord.ui.TextInput(
+        label="Your PSN / PlayStation name",
+        placeholder="Example: XSI-Trader_123",
+        required=True,
+        max_length=32,
+        style=discord.TextStyle.short,
+    )
+
+    def __init__(self, parent: "TradePreCheckView") -> None:
+        super().__init__(timeout=180)
+        self.parent = parent
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.parent.requester_id:
+            await interaction.response.send_message("❌ This PSN box was not opened for you.", ephemeral=True)
+            return
+
+        clean_psn = normalize_psn(self.psn.value)
+        if not valid_psn(clean_psn):
+            await interaction.response.send_message(
+                "❌ Please enter a valid PSN: 3-16 characters, using letters, numbers, `_`, or `-` only.",
+                ephemeral=True,
+            )
+            return
+
+        self.parent.psn = clean_psn
+        await interaction.response.edit_message(content=trade_precheck_message(self.parent), view=self.parent)
+
+
+class AddPSNButton(discord.ui.Button):
+    def __init__(self) -> None:
+        super().__init__(label="🎮 Add your PSN", style=discord.ButtonStyle.blurple, row=4)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        parent = self.view
+        if not isinstance(parent, TradePreCheckView):
+            await interaction.response.send_message("❌ This trade screen expired. Click the ticket button again.", ephemeral=True)
+            return
+        if interaction.user.id != parent.requester_id:
+            await interaction.response.send_message("❌ This PSN button was not opened for you.", ephemeral=True)
+            return
+
+        await interaction.response.send_modal(PSNModal(parent))
+
+
 class PhotoUploadModal(discord.ui.Modal, title="Add photo proof"):
     def __init__(self, parent: "TradePreCheckView") -> None:
         super().__init__(timeout=180)
@@ -3017,11 +3074,13 @@ class TradePreCheckView(discord.ui.View):
         self.trade_method: str | None = None
         self.facility: str | None = None
         self.proof_method: str | None = None
+        self.psn: str | None = None
         self.server_link: str | None = None
         self.photo_timing: str | None = None
         self.photo_uploads: list[dict[str, str]] = []
         self.add_item(TradeMethodSelect())
         self.add_item(ProofMethodSelect())
+        self.add_item(AddPSNButton())
 
     def sync_facility_select(self) -> None:
         for item in list(self.children):
@@ -3056,6 +3115,13 @@ class TradePreCheckView(discord.ui.View):
         if self.trade_method not in {TRADE_METHOD_CARMEET, TRADE_METHOD_GCTF}:
             await interaction.response.send_message(
                 "❌ Please choose **Carmeet** or **GCTF** from the dropdown first.",
+                ephemeral=True,
+            )
+            return
+
+        if not self.psn:
+            await interaction.response.send_message(
+                "❌ Please press **🎮 Add your PSN** and enter your PlayStation name before creating the trade ticket.",
                 ephemeral=True,
             )
             return
@@ -3124,6 +3190,7 @@ class TradePreCheckView(discord.ui.View):
         trade_lines = [
             f"✅ {proof_summary}",
             f"Trade option: {self.trade_method}",
+            f"PSN: {self.psn}",
             f"Proof method: {self.proof_method}",
         ]
         if self.proof_method == PROOF_METHOD_PHOTOS and self.photo_timing:
@@ -6816,4 +6883,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
