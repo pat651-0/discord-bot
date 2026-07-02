@@ -25,8 +25,8 @@ from discord.ext import commands, tasks
 # python xsi_bot_full_setup_requiredpermissions.py
 # ============================================================
 
-VERSION = "XSI full setup build 2026-06-23 / configurable-ticket-ui-buttons-custom-messages"
-BUILD_TAG = "XSI-FORCE-50-CUSTOM-TICKET-WELCOME-GUILT-MESSAGES"
+VERSION = "XSI full setup build 2026-07-01 / trade-options-carmeet-gctf-facility"
+BUILD_TAG = "XSI-TRADE-OPTIONS-CARMEET-GCTF-FACILITY"
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
@@ -86,7 +86,9 @@ RECORD_CHANNEL_DELETE_AFTER = 60 * 60
 MAX_RECORD_SELECT_OPTIONS = 25
 MAX_RECORD_PREVIEW_CHUNKS = 20
 MAX_TICKET_PANEL_BUTTONS = 5
-DEFAULT_TICKET_BUTTON_LABEL = "🎟️ Open Ticket"
+# Kept for detecting old saved configs that only had the original single button.
+LEGACY_TICKET_BUTTON_LABEL = "🎟️ Open Ticket"
+DEFAULT_TICKET_BUTTON_LABEL = LEGACY_TICKET_BUTTON_LABEL
 TICKET_PANEL_CUSTOM_ID_PREFIX = "xsi_ticket_panel_button_"
 
 # Optional: put your Discord user ID here if you want your ticket replies to DM ticket owners.
@@ -353,11 +355,49 @@ smart_cooldowns: dict[str, float] = {}
 def default_ticket_buttons() -> list[dict[str, Any]]:
     return [
         {
-            "label": DEFAULT_TICKET_BUTTON_LABEL,
+            "label": "Quick Trade",
             "style": "green",
             "auto_messages": True,
-        }
+            "category_id": None,
+            "reason": (
+                "Quick trade request. Tell us what you are trading, what you want, "
+                "your platform, and any important trade details."
+            ),
+            "emoji": "⚡",
+        },
+        {
+            "label": "Trade Questions",
+            "style": "blue",
+            "auto_messages": True,
+            "category_id": None,
+            "reason": (
+                "Trade question. Ask your question and include any relevant trade, "
+                "platform, or item details so staff can help faster."
+            ),
+            "emoji": "❓",
+        },
     ]
+
+
+def is_legacy_default_ticket_buttons(raw_buttons: Any) -> bool:
+    """Return True only for the untouched old one-button default panel.
+
+    This lets existing servers automatically upgrade to the new Quick Trade +
+    Trade Questions default without overwriting admins who already customized
+    their ticket buttons.
+    """
+    if not isinstance(raw_buttons, list) or len(raw_buttons) != 1:
+        return False
+
+    item = raw_buttons[0]
+    if isinstance(item, dict):
+        label = str(item.get("label") or "").strip()
+        category_id = item.get("category_id")
+        reason = str(item.get("reason") or item.get("open_message") or "").strip()
+        emoji = str(item.get("emoji") or "").strip()
+        return label == LEGACY_TICKET_BUTTON_LABEL and not category_id and not reason and not emoji
+
+    return str(item or "").strip() == LEGACY_TICKET_BUTTON_LABEL
 
 
 def default_guild_config() -> dict[str, Any]:
@@ -429,6 +469,9 @@ def ensure_guild_config(guild_id: int) -> dict[str, Any]:
         changed = True
 
     if not isinstance(data.get("ticket_buttons"), list):
+        data["ticket_buttons"] = default_ticket_buttons()
+        changed = True
+    elif is_legacy_default_ticket_buttons(data.get("ticket_buttons")):
         data["ticket_buttons"] = default_ticket_buttons()
         changed = True
 
@@ -552,6 +595,8 @@ def render_custom_message(
     member: discord.Member | discord.User | None = None,
     guild: discord.Guild | None = None,
     ticket_type: str | None = None,
+    ticket_reason: str | None = None,
+    button_number: int | None = None,
     channel: discord.TextChannel | None = None,
     offence: str | None = None,
     punishment: str | None = None,
@@ -564,7 +609,8 @@ def render_custom_message(
 
     Supported placeholders:
     {user}, {username}, {display_name}, {user_id}, {server}, {ticket_type},
-    {channel}, {channel_id}, {offence}, {reason}, {punishment}, {warnings},
+    {ticket_reason}, {button_reason}, {button_number}, {channel}, {channel_id},
+    {offence}, {reason}, {punishment}, {warnings},
     {max_warnings}, {moderator}, {moderator_name}, {message}, {availability},
     {date}, and {time}.
     """
@@ -590,6 +636,9 @@ def render_custom_message(
         "{server}": guild.name if guild is not None else "this server",
         "{ticket_type}": str(ticket_type or "Ticket"),
         "{button}": str(ticket_type or "Ticket"),
+        "{ticket_reason}": str(ticket_reason or ""),
+        "{button_reason}": str(ticket_reason or ""),
+        "{button_number}": str(button_number if button_number is not None else ""),
         "{channel}": channel.mention if channel is not None else "",
         "{channel_id}": str(channel.id) if channel is not None else "",
         "{offence}": str(offence or ""),
@@ -613,8 +662,9 @@ def render_custom_message(
 def custom_message_help_text() -> str:
     return (
         "Placeholders: `{user}`, `{username}`, `{display_name}`, `{server}`, "
-        "`{ticket_type}`, `{channel}`, `{offence}`, `{punishment}`, `{warnings}`, "
-        "`{moderator}`, `{message}`, `{availability}`. Mentions like @users, "
+        "`{ticket_type}`, `{ticket_reason}`, `{button_number}`, `{channel}`, "
+        "`{offence}`, `{punishment}`, `{warnings}`, `{moderator}`, `{message}`, "
+        "`{availability}`. Mentions like @users, "
         "@roles, and @everyone are allowed in saved custom messages."
     )
 
@@ -1272,6 +1322,8 @@ async def create_ticket_record(
     auto_messages: bool,
     ticket_type: str = "Ticket",
     button_index: int | None = None,
+    category_id: int | None = None,
+    ticket_reason: str | None = None,
 ) -> str:
     async with record_lock:
         bucket = _record_bucket(channel.guild.id)
@@ -1292,6 +1344,8 @@ async def create_ticket_record(
             "auto_messages": bool(auto_messages),
             "ticket_type": ticket_type,
             "button_index": button_index,
+            "category_id": category_id,
+            "ticket_reason": str(ticket_reason or "").strip() or None,
             "claimed_by": None,
             "messages": [],
             "events": [],
@@ -1349,6 +1403,8 @@ async def get_or_create_ticket_record_for_channel(channel: discord.TextChannel, 
             "auto_messages": bool(data.get("auto_messages", False)),
             "ticket_type": str(data.get("ticket_type") or "Ticket"),
             "button_index": data.get("button_index"),
+            "category_id": data.get("category_id"),
+            "ticket_reason": data.get("ticket_reason"),
             "claimed_by": data.get("claimed_by"),
             "messages": [],
             "events": [],
@@ -1502,6 +1558,12 @@ def build_ticket_record_transcript(record: dict[str, Any]) -> str:
     lines.append(f"Owner: {owner_text}")
     if record.get("ticket_type"):
         lines.append(f"Ticket Type: {record.get('ticket_type')}")
+    if record.get("button_index"):
+        lines.append(f"Button Slot: {record.get('button_index')}")
+    if record.get("category_id"):
+        lines.append(f"Ticket Category ID: {record.get('category_id')}")
+    if record.get("ticket_reason"):
+        lines.append(f"Ticket Reason / Prompt: {record.get('ticket_reason')}")
     lines.append(f"Status: {str(record.get('status') or 'unknown').title()}")
     lines.append(f"Original Channel: #{record.get('channel_name', 'unknown')} ({record.get('channel_id', 'unknown')})")
     lines.append(f"Created: {_record_datetime_text(record.get('created_at'))}")
@@ -1687,7 +1749,9 @@ async def create_record_review_channel(
             f"Type: **{str(record.get('ticket_type') or 'Ticket')}**\n"
             f"Status: **{str(record.get('status') or 'unknown').title()}**\n"
             f"Created: `{_record_datetime_text(record.get('created_at'))}`\n"
-            f"Original Channel: `#{record.get('channel_name', 'unknown')}`\n\n"
+            f"Original Channel: `#{record.get('channel_name', 'unknown')}`\n"
+            f"Button Slot: `{record.get('button_index') or 'N/A'}`\n"
+            f"Reason/Prompt: {truncate_discord_text(record.get('ticket_reason'), 800, 'None')}\n\n"
             "Use the button below when finished. This temporary record channel also auto-deletes after 1 hour."
         ),
         color=discord.Color.blurple(),
@@ -1738,6 +1802,23 @@ def normalize_ticket_button_label(label: Any) -> str:
     return clean_label[:80]
 
 
+def normalize_ticket_button_emoji(emoji: Any) -> str | None:
+    clean_emoji = re.sub(r"\s+", " ", str(emoji or "")).strip()
+    if not clean_emoji:
+        return None
+    return clean_emoji[:100]
+
+
+def discord_button_emoji(emoji: Any) -> str | discord.PartialEmoji | None:
+    clean_emoji = normalize_ticket_button_emoji(emoji)
+    if not clean_emoji:
+        return None
+    try:
+        return discord.PartialEmoji.from_str(clean_emoji)
+    except Exception:
+        return clean_emoji
+
+
 def get_ticket_button_configs(config: dict[str, Any]) -> list[dict[str, Any]]:
     raw_buttons = config.get("ticket_buttons")
     buttons: list[dict[str, Any]] = []
@@ -1748,10 +1829,16 @@ def get_ticket_button_configs(config: dict[str, Any]) -> list[dict[str, Any]]:
                 label = normalize_ticket_button_label(item.get("label"))
                 style = str(item.get("style") or "green").lower().strip()
                 auto_messages = bool(item.get("auto_messages", True))
+                category_id = _safe_int(item.get("category_id"), 0) or None
+                reason = truncate_discord_text(item.get("reason") or item.get("open_message"), 1500, "").strip() or None
+                emoji = normalize_ticket_button_emoji(item.get("emoji"))
             else:
                 label = normalize_ticket_button_label(item)
                 style = "green"
                 auto_messages = True
+                category_id = None
+                reason = None
+                emoji = None
 
             if not label:
                 continue
@@ -1761,6 +1848,9 @@ def get_ticket_button_configs(config: dict[str, Any]) -> list[dict[str, Any]]:
                     "label": label,
                     "style": style,
                     "auto_messages": auto_messages,
+                    "category_id": category_id,
+                    "reason": reason,
+                    "emoji": emoji,
                 }
             )
 
@@ -1818,8 +1908,100 @@ def parse_ticket_button_labels(raw: str) -> list[str]:
     return [normalize_ticket_button_label(part) for part in split_parts if normalize_ticket_button_label(part)][:MAX_TICKET_PANEL_BUTTONS]
 
 
-def format_ticket_buttons_for_reply(buttons: list[dict[str, Any]]) -> str:
-    return "\n".join(f"Button {index}: **{button['label']}**" for index, button in enumerate(buttons, start=1))
+def format_ticket_buttons_for_reply(buttons: list[dict[str, Any]], guild: discord.Guild | None = None) -> str:
+    lines: list[str] = []
+    for index, button in enumerate(buttons, start=1):
+        category_id = _safe_int(button.get("category_id"), 0)
+        category_text = "default ticket category"
+        if category_id:
+            category = guild.get_channel(category_id) if guild is not None else None
+            category_text = f"category **{category.name}**" if isinstance(category, discord.CategoryChannel) else f"category ID `{category_id}`"
+        reason = truncate_discord_text(button.get("reason"), 90, "no custom reason")
+        emoji_text = f"{button.get('emoji')} " if button.get("emoji") else ""
+        lines.append(
+            f"Button {index}: {emoji_text}**{button['label']}** → {category_text} • {reason}"
+        )
+    return "\n".join(lines)
+
+
+async def apply_ticket_button_slot(
+    guild: discord.Guild,
+    source_channel: discord.TextChannel | None,
+    slot: int,
+    label: str,
+    category: discord.CategoryChannel | None = None,
+    reason: str | None = None,
+    emoji: str | None = None,
+    style: str = "green",
+    auto_messages: bool = True,
+) -> tuple[bool, str]:
+    if slot < 1 or slot > MAX_TICKET_PANEL_BUTTONS:
+        return False, f"❌ Button slot must be between 1 and {MAX_TICKET_PANEL_BUTTONS}."
+
+    clean_label = normalize_ticket_button_label(label)
+    if not clean_label:
+        return False, "❌ Button label cannot be empty."
+
+    clean_reason = truncate_discord_text(reason, 1500, "").strip() or None
+    clean_emoji = normalize_ticket_button_emoji(emoji)
+    clean_style = str(style or "green").lower().strip()
+    if clean_style not in {"green", "success", "grey", "gray", "secondary", "blue", "blurple", "primary", "red", "danger"}:
+        clean_style = "green"
+
+    config = guild_config(guild.id)
+    buttons = get_ticket_button_configs(config)
+    while len(buttons) < slot:
+        buttons.append(
+            {
+                "label": f"Ticket {len(buttons) + 1}",
+                "style": "green",
+                "auto_messages": True,
+                "category_id": None,
+                "reason": None,
+                "emoji": None,
+            }
+        )
+
+    buttons[slot - 1] = {
+        "label": clean_label,
+        "style": clean_style,
+        "auto_messages": bool(auto_messages),
+        "category_id": category.id if category is not None else None,
+        "reason": clean_reason,
+        "emoji": clean_emoji,
+    }
+    config["ticket_buttons"] = buttons[:MAX_TICKET_PANEL_BUTTONS]
+
+    panel_channel = await get_text_channel(guild, config.get("ticket_panel_channel_id"))
+    force_new = False
+    if panel_channel is None and source_channel is not None:
+        panel_channel = source_channel
+        config["ticket_panel_channel_id"] = source_channel.id
+        config["ticket_panel_message_id"] = None
+        force_new = True
+
+    await save_server_settings()
+    message = await send_or_update_ticket_panel(guild, panel_channel, force_new=force_new)
+    summary = format_ticket_buttons_for_reply(get_ticket_button_configs(config), guild)
+    refresh_text = "Ticket panel refreshed." if message is not None else "Saved, but no ticket panel channel is set yet. Run `/tickets` or `!tickets`."
+    return True, f"✅ Button {slot} configured. {refresh_text}\n{summary}"
+
+
+async def remove_ticket_button_slot(
+    guild: discord.Guild,
+    slot: int,
+) -> tuple[bool, str]:
+    if slot < 1 or slot > MAX_TICKET_PANEL_BUTTONS:
+        return False, f"❌ Button slot must be between 1 and {MAX_TICKET_PANEL_BUTTONS}."
+    config = guild_config(guild.id)
+    buttons = get_ticket_button_configs(config)
+    if slot > len(buttons):
+        return False, "❌ That button slot is already empty."
+    buttons.pop(slot - 1)
+    config["ticket_buttons"] = buttons or default_ticket_buttons()
+    await save_server_settings()
+    await send_or_update_ticket_panel(guild)
+    return True, f"✅ Removed button {slot}.\n{format_ticket_buttons_for_reply(get_ticket_button_configs(config), guild)}"
 
 
 async def apply_ticket_button_labels(
@@ -1838,7 +2020,7 @@ async def apply_ticket_button_labels(
 
     config = guild_config(guild.id)
     config["ticket_buttons"] = [
-        {"label": label, "style": "green", "auto_messages": True}
+        {"label": label, "style": "green", "auto_messages": True, "category_id": None, "reason": None, "emoji": None}
         for label in clean_labels
     ]
 
@@ -1854,10 +2036,57 @@ async def apply_ticket_button_labels(
     message = await send_or_update_ticket_panel(guild, panel_channel, force_new=force_new)
 
     buttons = get_ticket_button_configs(config)
-    summary = format_ticket_buttons_for_reply(buttons)
+    summary = format_ticket_buttons_for_reply(buttons, guild)
     if message is None:
         return False, f"⚠️ Ticket buttons saved, but no ticket panel channel is set. Run `/tickets` or `!tickets`.\n{summary}"
     return True, f"✅ Ticket UI updated with {len(buttons)} button(s).\n{summary}"
+
+
+async def apply_ticket_ui_customation(
+    guild: discord.Guild,
+    source_channel: discord.TextChannel | None,
+    *,
+    title: str | None = None,
+    message: str | None = None,
+    channel: discord.TextChannel | None = None,
+    reset: bool = False,
+) -> tuple[bool, str]:
+    config = guild_config(guild.id)
+
+    if reset:
+        config["ticket_panel_title"] = None
+        config["ticket_panel_message"] = None
+    else:
+        if title is not None and title.strip():
+            config["ticket_panel_title"] = truncate_discord_text(title, 256, DEFAULT_TICKET_PANEL_TITLE)
+        if message is not None and message.strip():
+            config["ticket_panel_message"] = truncate_discord_text(message, 4096, "")
+
+    force_new = False
+    target_channel = channel
+    if target_channel is not None:
+        if config.get("ticket_panel_channel_id") != target_channel.id:
+            config["ticket_panel_channel_id"] = target_channel.id
+            config["ticket_panel_message_id"] = None
+            force_new = True
+    else:
+        target_channel = await get_text_channel(guild, config.get("ticket_panel_channel_id"))
+        if target_channel is None and source_channel is not None:
+            target_channel = source_channel
+            config["ticket_panel_channel_id"] = source_channel.id
+            config["ticket_panel_message_id"] = None
+            force_new = True
+
+    await save_server_settings()
+    panel_message = await send_or_update_ticket_panel(guild, target_channel, force_new=force_new)
+    status = "Ticket panel refreshed." if panel_message is not None else "Saved, but no ticket panel channel is set yet. Run `/tickets` or `!tickets`."
+    current_title = config.get("ticket_panel_title") or DEFAULT_TICKET_PANEL_TITLE
+    current_message = config.get("ticket_panel_message") or "Default panel message with availability times."
+    return True, (
+        f"✅ Ticket UI customation saved. {status}\n"
+        f"Title: **{truncate_discord_text(current_title, 120, DEFAULT_TICKET_PANEL_TITLE)}**\n"
+        f"Message: {truncate_discord_text(current_message, 180, 'Default panel message')}"
+    )
 
 
 def ticket_panel_embed(guild_id: int, normal: bool = True) -> discord.Embed:
@@ -1929,10 +2158,13 @@ async def create_ticket_channel(
     auto_messages: bool,
     ticket_type: str = "Ticket",
     button_index: int | None = None,
+    category_id: int | None = None,
+    ticket_reason: str | None = None,
 ) -> None:
     guild = interaction.guild
     user = interaction.user
     ticket_type = normalize_ticket_button_label(ticket_type) or "Ticket"
+    ticket_reason = truncate_discord_text(ticket_reason, 1500, "").strip() or None
 
     if guild is None:
         await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
@@ -1945,7 +2177,20 @@ async def create_ticket_channel(
         await interaction.followup.send(f"❌ You already have a ticket: {existing_ticket.mention}")
         return
 
-    category = get_ticket_category(guild)
+    category: discord.CategoryChannel | None = None
+    category_lookup_id = _safe_int(category_id, 0)
+    if category_lookup_id:
+        selected_category = guild.get_channel(category_lookup_id)
+        if isinstance(selected_category, discord.CategoryChannel):
+            category = selected_category
+        else:
+            await interaction.followup.send(
+                "❌ This ticket button has a saved category, but that category no longer exists. Reconfigure the button."
+            )
+            return
+
+    if category is None:
+        category = get_ticket_category(guild)
     if category is None:
         await interaction.followup.send("❌ Ticket category not found. Run `/setup` or `/setticketcategory` first.")
         return
@@ -2002,7 +2247,15 @@ async def create_ticket_channel(
         await interaction.followup.send("❌ Discord rejected the ticket channel creation. Check permissions/category limits.")
         return
 
-    record_id = await create_ticket_record(channel, user, auto_messages, ticket_type=ticket_type, button_index=button_index)
+    record_id = await create_ticket_record(
+        channel,
+        user,
+        auto_messages,
+        ticket_type=ticket_type,
+        button_index=button_index,
+        category_id=category.id,
+        ticket_reason=ticket_reason,
+    )
 
     async with tickets_lock:
         ticket_owners[str(channel.id)] = {
@@ -2013,6 +2266,8 @@ async def create_ticket_channel(
             "auto_messages": auto_messages,
             "ticket_type": ticket_type,
             "button_index": button_index,
+            "category_id": category.id,
+            "ticket_reason": ticket_reason,
             "created_at": int(time.time()),
             "claimed_by": None,
             "record_id": record_id,
@@ -2035,13 +2290,25 @@ async def create_ticket_channel(
             member=user,
             guild=guild,
             ticket_type=ticket_type,
+            ticket_reason=ticket_reason,
+            button_number=button_index,
             channel=channel,
             availability_line=availability_text,
         )
         if not auto_messages and "{availability}" not in custom_open_message:
             description = description.strip()
     else:
-        description = render_custom_message(default_open_message, member=user, guild=guild, ticket_type=ticket_type, channel=channel)
+        description = render_custom_message(
+            default_open_message,
+            member=user,
+            guild=guild,
+            ticket_type=ticket_type,
+            ticket_reason=ticket_reason,
+            button_number=button_index,
+            channel=channel,
+        )
+        if ticket_reason:
+            description = f"**Reason / Prompt:** {ticket_reason}\n\n" + description
         if auto_messages:
             description += "\n\n" + availability_text
 
@@ -2051,6 +2318,8 @@ async def create_ticket_channel(
         member=user,
         guild=guild,
         ticket_type=ticket_type,
+        ticket_reason=ticket_reason,
+        button_number=button_index,
         channel=channel,
         availability_line=availability_text,
     )
@@ -2062,8 +2331,13 @@ async def create_ticket_channel(
 
     ticket_embed.add_field(name="Opened By", value=user.mention, inline=True)
     ticket_embed.add_field(name="Ticket Type", value=ticket_type, inline=True)
+    if button_index is not None:
+        ticket_embed.add_field(name="Button Slot", value=str(button_index), inline=True)
+    ticket_embed.add_field(name="Category", value=category.name, inline=True)
     ticket_embed.add_field(name="Status", value="Open", inline=True)
     ticket_embed.add_field(name="Claimed By", value="Not claimed", inline=True)
+    if ticket_reason:
+        ticket_embed.add_field(name="Reason / Prompt", value=truncate_discord_text(ticket_reason, 1024, "-"), inline=False)
 
     await channel.send(content=user.mention, embed=ticket_embed, view=CloseButton(), allowed_mentions=CUSTOM_ALLOWED_MENTIONS)
 
@@ -2301,12 +2575,256 @@ class RecordPickerView(discord.ui.View):
         self.add_item(RecordTicketSelect(records))
 
 
+
+# ===================== TRADE PROOF REQUIREMENT SYSTEM =====================
+
+IMAGE_ATTACHMENT_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".heic", ".heif")
+DISCORD_INVITE_RE = re.compile(
+    r"(?:https?://)?(?:www\.)?(?:discord\.gg|discord(?:app)?\.com/invite)/[A-Za-z0-9-]+",
+    flags=re.IGNORECASE,
+)
+URL_RE = re.compile(r"https?://[^\s<>()]+", flags=re.IGNORECASE)
+TRADE_METHOD_CARMEET = "Carmeet"
+TRADE_METHOD_GCTF = "GCTF"
+
+GCTF_FACILITY_OPTIONS: list[tuple[str, str]] = [
+    ("Paleto Bay Facility", "Paleto Bay & Mount Chiliad Region"),
+    ("Mount Gordo Facility", "Paleto Bay & Mount Chiliad Region"),
+    ("Lago Zancudo Facility", "Zancudo & West Coast Region"),
+    ("Zancudo River Facility", "Zancudo & West Coast Region"),
+    ("RON Alternates Wind Farm Facility", "Grand Senora Desert & Central Region"),
+    ("Route 68 Facility", "Grand Senora Desert & Central Region"),
+    ("Grand Senora Desert Facility", "Grand Senora Desert & Central Region"),
+    ("Sandy Shores Facility", "Grand Senora Desert & Central Region"),
+    ("Land Act Reservoir Facility", "Los Santos Region"),
+]
+
+
+def ticket_button_requires_trade_proof(config: dict[str, Any]) -> bool:
+    """Require proof for real trade tickets, but not simple trade-question tickets."""
+    label = normalize_text(str(config.get("label") or ""))
+    reason = normalize_text(str(config.get("reason") or ""))
+    combined = f"{label} {reason}"
+
+    if "trade" not in combined:
+        return False
+
+    # People asking trade questions should be able to ask without uploading proof.
+    question_words = {"question", "questions", "query", "queries", "faq", "help"}
+    if any(word in label.split() for word in question_words):
+        return False
+
+    return True
+
+
+def message_has_image_attachment(message: discord.Message) -> bool:
+    for attachment in message.attachments:
+        filename = str(getattr(attachment, "filename", "") or "").lower()
+        content_type = str(getattr(attachment, "content_type", "") or "").lower()
+        if content_type.startswith("image/") or filename.endswith(IMAGE_ATTACHMENT_EXTENSIONS):
+            return True
+    return False
+
+
+def extract_server_link(text: str) -> str | None:
+    content = str(text or "")
+    invite_match = DISCORD_INVITE_RE.search(content)
+    if invite_match:
+        return invite_match.group(0)
+
+    # Fallback: accept any normal link as a server link so admins can verify it.
+    # Discord invites are preferred above, but this keeps the gate flexible.
+    url_match = URL_RE.search(content)
+    if url_match:
+        return url_match.group(0)
+
+    return None
+
+
+async def find_recent_trade_proof(channel: discord.TextChannel, user_id: int, limit: int = 15) -> dict[str, str | bool | None]:
+    async for message in channel.history(limit=limit):
+        if message.author.id != user_id:
+            continue
+
+        if message_has_image_attachment(message):
+            return {
+                "ok": True,
+                "kind": "images",
+                "summary": "Image proof was attached before ticket creation.",
+            }
+
+        server_link = extract_server_link(message.content)
+        if server_link:
+            clean_link = truncate_discord_text(server_link, 180, "server link")
+            return {
+                "ok": True,
+                "kind": "server_link",
+                "summary": f"Server link provided before ticket creation: {clean_link}",
+            }
+
+    return {"ok": False, "kind": None, "summary": None}
+
+
+def trade_precheck_message(view: "TradePreCheckView") -> str:
+    trade_method = view.trade_method or "Not selected yet"
+    facility = view.facility or "Required only for GCTF"
+    return (
+        "📸🔗 **Trade ticket check**\n\n"
+        "Before I create this trade ticket, complete these steps:\n"
+        "1. Pick **how you would like to trade** from the dropdown.\n"
+        "2. If you pick **GCTF**, choose **where your facility is**.\n"
+        "3. Send **image proof of your cars/server** or **a server invite/link** in this channel.\n"
+        "4. Press **Create trade ticket**.\n\n"
+        f"**Trade option:** `{trade_method}`\n"
+        f"**Facility:** `{facility}`"
+    )
+
+
+class TradeMethodSelect(discord.ui.Select):
+    def __init__(self) -> None:
+        super().__init__(
+            placeholder="How would you like to trade?",
+            min_values=1,
+            max_values=1,
+            row=0,
+            options=[
+                discord.SelectOption(
+                    label=TRADE_METHOD_CARMEET,
+                    value=TRADE_METHOD_CARMEET,
+                    description="Carmeet trade / standard meet-up trade",
+                    emoji="🚗",
+                ),
+                discord.SelectOption(
+                    label=TRADE_METHOD_GCTF,
+                    value=TRADE_METHOD_GCTF,
+                    description="Give Cars To Friends — facility location required",
+                    emoji="🏢",
+                ),
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        parent = self.view
+        if not isinstance(parent, TradePreCheckView):
+            await interaction.response.send_message("❌ This trade screen expired. Click the ticket button again.", ephemeral=True)
+            return
+        if interaction.user.id != parent.requester_id:
+            await interaction.response.send_message("❌ This trade dropdown was not opened for you.", ephemeral=True)
+            return
+
+        parent.trade_method = self.values[0]
+        if parent.trade_method != TRADE_METHOD_GCTF:
+            parent.facility = None
+        parent.sync_facility_select()
+        await interaction.response.edit_message(content=trade_precheck_message(parent), view=parent)
+
+
+class GCTFFacilitySelect(discord.ui.Select):
+    def __init__(self) -> None:
+        super().__init__(
+            placeholder="GCTF selected — where is your facility?",
+            min_values=1,
+            max_values=1,
+            row=1,
+            options=[
+                discord.SelectOption(label=name, value=name, description=region, emoji="📍")
+                for name, region in GCTF_FACILITY_OPTIONS
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        parent = self.view
+        if not isinstance(parent, TradePreCheckView):
+            await interaction.response.send_message("❌ This trade screen expired. Click the ticket button again.", ephemeral=True)
+            return
+        if interaction.user.id != parent.requester_id:
+            await interaction.response.send_message("❌ This facility dropdown was not opened for you.", ephemeral=True)
+            return
+
+        parent.facility = self.values[0]
+        await interaction.response.edit_message(content=trade_precheck_message(parent), view=parent)
+
+
+class TradePreCheckView(discord.ui.View):
+    def __init__(self, requester_id: int, ticket_kwargs: dict[str, Any]) -> None:
+        super().__init__(timeout=180)
+        self.requester_id = requester_id
+        self.ticket_kwargs = ticket_kwargs
+        self.trade_method: str | None = None
+        self.facility: str | None = None
+        self.add_item(TradeMethodSelect())
+
+    def sync_facility_select(self) -> None:
+        for item in list(self.children):
+            if isinstance(item, GCTFFacilitySelect):
+                self.remove_item(item)
+
+        if self.trade_method == TRADE_METHOD_GCTF:
+            self.add_item(GCTFFacilitySelect())
+
+    @discord.ui.button(label="✅ Create trade ticket", style=discord.ButtonStyle.green, row=4)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message("❌ This trade-check button was not opened for you.", ephemeral=True)
+            return
+
+        if not isinstance(interaction.channel, discord.TextChannel):
+            await interaction.response.send_message("❌ This only works inside a server text channel.", ephemeral=True)
+            return
+
+        if self.trade_method not in {TRADE_METHOD_CARMEET, TRADE_METHOD_GCTF}:
+            await interaction.response.send_message(
+                "❌ Please choose **Carmeet** or **GCTF** from the dropdown first.",
+                ephemeral=True,
+            )
+            return
+
+        if self.trade_method == TRADE_METHOD_GCTF and not self.facility:
+            await interaction.response.send_message(
+                "❌ You selected **GCTF**, so please choose where your facility is before creating the ticket.",
+                ephemeral=True,
+            )
+            return
+
+        proof = await find_recent_trade_proof(interaction.channel, interaction.user.id)
+        if not proof.get("ok"):
+            await interaction.response.send_message(
+                "❌ Before I create this trade ticket, please send **one** of these in this channel:\n"
+                "• image(s) of your cars/server\n"
+                "• a link/invite to your server\n\n"
+                "Then press **Create trade ticket** again.",
+                ephemeral=True,
+            )
+            return
+
+        ticket_kwargs = dict(self.ticket_kwargs)
+        proof_summary = str(proof.get("summary") or "Trade proof confirmed before ticket creation.")
+        trade_lines = [
+            f"✅ {proof_summary}",
+            f"Trade option: {self.trade_method}",
+        ]
+        if self.trade_method == TRADE_METHOD_GCTF and self.facility:
+            trade_lines.append(f"Facility: {self.facility}")
+
+        current_reason = str(ticket_kwargs.get("ticket_reason") or "").strip()
+        trade_summary = "\n".join(trade_lines)
+        ticket_kwargs["ticket_reason"] = (
+            f"{current_reason}\n\n{trade_summary}" if current_reason else trade_summary
+        )
+
+        for item in self.children:
+            item.disabled = True
+
+        await create_ticket_channel(interaction, **ticket_kwargs)
+
+
 class TicketPanelButton(discord.ui.Button):
     def __init__(self, index: int, config: dict[str, Any] | None = None) -> None:
         self.index = index
         config = config or {"label": f"Ticket {index}", "style": "green", "auto_messages": True}
         super().__init__(
             label=normalize_ticket_button_label(config.get("label")) or f"Ticket {index}",
+            emoji=discord_button_emoji(config.get("emoji")),
             style=ticket_button_style(str(config.get("style") or "green")),
             custom_id=f"{TICKET_PANEL_CUSTOM_ID_PREFIX}{index}",
             row=(index - 1) // 5,
@@ -2325,12 +2843,24 @@ class TicketPanelButton(discord.ui.Button):
             )
             return
 
-        await create_ticket_channel(
-            interaction,
-            auto_messages=bool(config.get("auto_messages", True)),
-            ticket_type=str(config.get("label") or "Ticket"),
-            button_index=self.index,
-        )
+        ticket_kwargs = {
+            "auto_messages": bool(config.get("auto_messages", True)),
+            "ticket_type": str(config.get("label") or "Ticket"),
+            "button_index": self.index,
+            "category_id": _safe_int(config.get("category_id"), 0) or None,
+            "ticket_reason": str(config.get("reason") or "").strip() or None,
+        }
+
+        if ticket_button_requires_trade_proof(config):
+            view = TradePreCheckView(interaction.user.id, ticket_kwargs)
+            await interaction.response.send_message(
+                trade_precheck_message(view),
+                view=view,
+                ephemeral=True,
+            )
+            return
+
+        await create_ticket_channel(interaction, **ticket_kwargs)
 
 
 class TicketPanelView(discord.ui.View):
@@ -3557,7 +4087,7 @@ async def buildcheck_cmd(ctx: commands.Context) -> None:
     critical = [
         "clearsetup", "setunavailable", "refreshticketpanel", "changeticketui",
         "customwelcome", "customticketmessage", "customticketopenmessage", "customguilt",
-        "setavailability", "availability", "clearunavailable", "record", "setrecordcategory", "setrecordchannel"
+        "setavailability", "availability", "clearunavailable", "record", "setrecordcategory", "setrecordchannel", "ticket", "ticketuicustomation", "customiseticketui"
     ]
     missing = [name for name in critical if name not in names]
     missing_text = ", ".join(missing) if missing else "None"
@@ -3737,6 +4267,25 @@ async def customticketmessage_prefix(ctx: commands.Context, *, message: str) -> 
         f"✅ Custom ticket panel message saved {status}. Use `{{availability}}` to show times/status.",
         allowed_mentions=discord.AllowedMentions.none(),
     )
+
+
+@bot.command(name="ticketuicustomation", aliases=["ticketuicustomization", "customiseticketui", "customizeticketui", "customticketui", "ticketpanelcustom"])
+@commands.has_permissions(administrator=True)
+async def ticketuicustomation_prefix(ctx: commands.Context, *, text: str = "") -> None:
+    if ctx.guild is None or not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("❌ This command only works inside a server text channel.")
+        return
+    parts = [part.strip() for part in text.split("|", 1)]
+    if not text.strip():
+        await ctx.send(
+            "❌ Format: `!ticketuicustomation Panel Title | Panel message`\n"
+            "Example: `!ticketuicustomation 🎟️ Open a Trade Ticket | Pick the correct button below. {availability}`"
+        )
+        return
+    title = parts[0] if parts else None
+    message = parts[1] if len(parts) > 1 else None
+    _, reply = await apply_ticket_ui_customation(ctx.guild, ctx.channel, title=title, message=message)
+    await ctx.send(reply, allowed_mentions=discord.AllowedMentions.none())
 
 
 @bot.command(name="customticketopenmessage", aliases=["customticketopened", "ticketopenmessage"])
@@ -3985,7 +4534,7 @@ async def changeticketui_prefix(ctx: commands.Context, *, buttons: str = "") -> 
     if not labels:
         await ctx.send(
             "❌ Give me the button labels. Examples:\n"
-            "`!changeticketui Support | Buy Something | Report Issue`\n"
+            "`!changeticketui Support | Buy Something | Report Issue`\n`!ticketuicustomation 🎟️ Open a Ticket | Click a button below. {availability}`\n"
             "`!changeticketui /button 1 Support /button 2 Buy Something /button 3 Report Issue`"
         )
         return
@@ -4000,7 +4549,78 @@ async def resetticketui_prefix(ctx: commands.Context) -> None:
     if ctx.guild is None or not isinstance(ctx.channel, discord.TextChannel):
         await ctx.send("❌ This command only works inside a server text channel.")
         return
-    _, reply = await apply_ticket_button_labels(ctx.guild, ctx.channel, [DEFAULT_TICKET_BUTTON_LABEL])
+    config = guild_config(ctx.guild.id)
+    config["ticket_buttons"] = default_ticket_buttons()
+    await save_server_settings()
+    message = await send_or_update_ticket_panel(ctx.guild, ctx.channel)
+    summary = format_ticket_buttons_for_reply(get_ticket_button_configs(config), ctx.guild)
+    refresh_text = "Ticket panel refreshed." if message is not None else "Saved, but no ticket panel channel is set yet. Run `/tickets` or `!tickets`."
+    await ctx.send(f"✅ Ticket UI reset to the default Quick Trade buttons. {refresh_text}\n{summary}", allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.command(name="ticketbutton", aliases=["setticketbutton"])
+@commands.has_permissions(administrator=True)
+async def ticketbutton_prefix(ctx: commands.Context, slot: int, *, config_text: str = "") -> None:
+    if ctx.guild is None or not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("❌ This command only works inside a server text channel.")
+        return
+    parts = [part.strip() for part in config_text.split("|")]
+    if not parts or not parts[0]:
+        await ctx.send(
+            "❌ Format: `!ticketbutton 1 Label | CATEGORY_ID | Reason text | Emoji | Style`\n"
+            "Example: `!ticketbutton 1 Support | 123456789012345678 | Explain your support issue. | 🎟️ | green`"
+        )
+        return
+
+    label = parts[0]
+    category: discord.CategoryChannel | None = None
+    reason = ""
+    emoji = ""
+    style = "green"
+
+    remaining = parts[1:]
+    if remaining:
+        if remaining[0].isdigit():
+            found = ctx.guild.get_channel(int(remaining[0]))
+            if not isinstance(found, discord.CategoryChannel):
+                await ctx.send("❌ The second value must be a valid category ID, or leave it empty.")
+                return
+            category = found
+            remaining = remaining[1:]
+        elif remaining[0].lower() in {"none", "default", ""}:
+            remaining = remaining[1:]
+
+    if remaining:
+        reason = remaining[0]
+    if len(remaining) >= 2:
+        emoji = remaining[1]
+    if len(remaining) >= 3:
+        style = remaining[2]
+
+    _, reply = await apply_ticket_button_slot(ctx.guild, ctx.channel, slot, label, category=category, reason=reason, emoji=emoji, style=style)
+    await ctx.send(reply, allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.command(name="ticketbuttons", aliases=["listticketbuttons"])
+@commands.has_permissions(administrator=True)
+async def ticketbuttons_prefix(ctx: commands.Context) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    buttons = get_ticket_button_configs(guild_config(ctx.guild.id))
+    await ctx.send(
+        "🎟️ **Configured ticket buttons**\n" + format_ticket_buttons_for_reply(buttons, ctx.guild),
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@bot.command(name="removeticketbutton", aliases=["delticketbutton"])
+@commands.has_permissions(administrator=True)
+async def removeticketbutton_prefix(ctx: commands.Context, slot: int) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    _, reply = await remove_ticket_button_slot(ctx.guild, slot)
     await ctx.send(reply, allowed_mentions=discord.AllowedMentions.none())
 
 
@@ -4533,7 +5153,7 @@ async def slash_buildcheck(interaction: discord.Interaction) -> None:
     critical = [
         "clearsetup", "setunavailable", "refreshticketpanel", "changeticketui",
         "customwelcome", "customticketmessage", "customticketopenmessage", "customguilt",
-        "setavailability", "availability", "clearunavailable", "record", "setrecordcategory", "setrecordchannel"
+        "setavailability", "availability", "clearunavailable", "record", "setrecordcategory", "setrecordchannel", "ticket", "ticketuicustomation", "customiseticketui"
     ]
     missing = [name for name in critical if name not in names]
     missing_text = ", ".join(missing) if missing else "None"
@@ -4743,6 +5363,78 @@ async def slash_customticketmessage(
         ephemeral=True,
         allowed_mentions=discord.AllowedMentions.none(),
     )
+
+
+@bot.tree.command(name="ticketuicustomation", description="Customize the ticket panel title/message/buttons UI text")
+@app_commands.describe(
+    title="Panel title. Example: 🎟️ Open a Ticket",
+    message="Panel message. Use {availability} to show availability times/status.",
+    channel="Optional channel to post/refresh the ticket panel in",
+    reset="Reset panel title/message back to default",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_ticketuicustomation(
+    interaction: discord.Interaction,
+    title: str | None = None,
+    message: str | None = None,
+    channel: discord.TextChannel | None = None,
+    reset: bool = False,
+) -> None:
+    if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This only works inside a server text channel.", ephemeral=True)
+        return
+    if not reset and title is None and message is None and channel is None:
+        await interaction.response.send_message(
+            "❌ Add a title and/or message. Example: `/ticketuicustomation title:🎟️ Open a Trade Ticket message:Pick the correct button below. {availability}`",
+            ephemeral=True,
+        )
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    _, reply = await apply_ticket_ui_customation(
+        interaction.guild,
+        interaction.channel,
+        title=title,
+        message=message,
+        channel=channel,
+        reset=reset,
+    )
+    await interaction.followup.send(reply, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.tree.command(name="customiseticketui", description="Customise the ticket panel title/message/buttons UI text")
+@app_commands.describe(
+    title="Panel title. Example: 🎟️ Open a Ticket",
+    message="Panel message. Use {availability} to show availability times/status.",
+    channel="Optional channel to post/refresh the ticket panel in",
+    reset="Reset panel title/message back to default",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_customiseticketui(
+    interaction: discord.Interaction,
+    title: str | None = None,
+    message: str | None = None,
+    channel: discord.TextChannel | None = None,
+    reset: bool = False,
+) -> None:
+    if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This only works inside a server text channel.", ephemeral=True)
+        return
+    if not reset and title is None and message is None and channel is None:
+        await interaction.response.send_message(
+            "❌ Add a title and/or message. Example: `/customiseticketui title:🎟️ Open a Trade Ticket message:Pick the correct button below. {availability}`",
+            ephemeral=True,
+        )
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    _, reply = await apply_ticket_ui_customation(
+        interaction.guild,
+        interaction.channel,
+        title=title,
+        message=message,
+        channel=channel,
+        reset=reset,
+    )
+    await interaction.followup.send(reply, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
 
 @bot.tree.command(name="customticketopenmessage", description="Customize the message inside new tickets")
@@ -5127,15 +5819,104 @@ async def slash_changeticketui(
     await interaction.followup.send(reply, ephemeral=True)
 
 
-@bot.tree.command(name="resetticketui", description="Reset the ticket panel back to one Open Ticket button")
+@bot.tree.command(name="resetticketui", description="Reset the ticket panel to Quick Trade and Trade Questions buttons")
 @app_commands.checks.has_permissions(administrator=True)
 async def slash_resetticketui(interaction: discord.Interaction) -> None:
     if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
         await interaction.response.send_message("❌ This only works inside a server text channel.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True, thinking=True)
-    _, reply = await apply_ticket_button_labels(interaction.guild, interaction.channel, [DEFAULT_TICKET_BUTTON_LABEL])
-    await interaction.followup.send(reply, ephemeral=True)
+    config = guild_config(interaction.guild.id)
+    config["ticket_buttons"] = default_ticket_buttons()
+    await save_server_settings()
+    message = await send_or_update_ticket_panel(interaction.guild, interaction.channel)
+    summary = format_ticket_buttons_for_reply(get_ticket_button_configs(config), interaction.guild)
+    refresh_text = "Ticket panel refreshed." if message is not None else "Saved, but no ticket panel channel is set yet. Run `/tickets` or `!tickets`."
+    await interaction.followup.send(
+        f"✅ Ticket UI reset to the default Quick Trade buttons. {refresh_text}\n{summary}",
+        ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+# ---------------- ADVANCED TICKET BUTTON SETUP GROUP ----------------
+ticket_group = app_commands.Group(name="ticket", description="Advanced XSI ticket-button setup")
+
+
+@ticket_group.command(name="button", description="Configure one ticket-panel button with its own category and reason")
+@app_commands.describe(
+    slot="Button number to configure, from 1 to 5",
+    label="Button text, for example Support, Buy, Report, Middleman",
+    category="Category where this button should create tickets",
+    reason="Text shown inside tickets created by this button",
+    emoji="Optional button emoji. Unicode emoji and custom emoji strings are supported.",
+    style="Button colour",
+    auto_messages="Whether XSI should add availability/auto-reply messages",
+)
+@app_commands.choices(
+    style=[
+        app_commands.Choice(name="Green", value="green"),
+        app_commands.Choice(name="Blue", value="blue"),
+        app_commands.Choice(name="Grey", value="grey"),
+        app_commands.Choice(name="Red", value="red"),
+    ]
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_ticket_group_button(
+    interaction: discord.Interaction,
+    slot: int,
+    label: str,
+    category: discord.CategoryChannel | None = None,
+    reason: str = "",
+    emoji: str = "",
+    style: str = "green",
+    auto_messages: bool = True,
+) -> None:
+    if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This only works inside a server text channel.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    _, reply = await apply_ticket_button_slot(
+        interaction.guild,
+        interaction.channel,
+        slot,
+        label,
+        category=category,
+        reason=reason,
+        emoji=emoji,
+        style=style,
+        auto_messages=auto_messages,
+    )
+    await interaction.followup.send(reply, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
+@ticket_group.command(name="list", description="List the configured ticket-panel buttons")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_ticket_group_list(interaction: discord.Interaction) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    buttons = get_ticket_button_configs(guild_config(interaction.guild.id))
+    await interaction.response.send_message(
+        "🎟️ **Configured ticket buttons**\n" + format_ticket_buttons_for_reply(buttons, interaction.guild),
+        ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@ticket_group.command(name="remove", description="Remove one configured ticket-panel button")
+@app_commands.describe(slot="Button number to remove, from 1 to 5")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_ticket_group_remove(interaction: discord.Interaction, slot: int) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    _, reply = await remove_ticket_button_slot(interaction.guild, slot)
+    await interaction.followup.send(reply, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
+bot.tree.add_command(ticket_group)
 
 
 @bot.tree.command(name="tickets", description="Post the ticket panel in this channel")
@@ -5675,6 +6456,8 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
             "`!setunavailable 3pm 6pm I am unavailable right now.`\n"
             "`!refreshticketpanel`\n"
             "`!changeticketui Support | Buy Something | Report Issue`\n"
+            "`!ticketbutton 1 Support | CATEGORY_ID | Explain your support issue. | 🎟️ | green`\n"
+            "`!ticketbuttons` / `!removeticketbutton 2`\n"
             "`!kick @user reason`\n"
             "`!kick @user --test reason`\n"
             "`!warn @user reason`\n"
@@ -5708,6 +6491,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
