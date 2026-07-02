@@ -4523,7 +4523,7 @@ async def refreshticketpanel_prefix(ctx: commands.Context) -> None:
     await ctx.send("✅ Ticket panel refreshed." if message else "❌ Ticket panel channel is not set. Run `/setup` or `/tickets`.")
 
 
-@bot.command(name="changeticketui", aliases=["ticketui", "ticketbuttons"])
+@bot.command(name="changeticketui", aliases=["ticketui"])
 @commands.has_permissions(administrator=True)
 async def changeticketui_prefix(ctx: commands.Context, *, buttons: str = "") -> None:
     if ctx.guild is None or not isinstance(ctx.channel, discord.TextChannel):
