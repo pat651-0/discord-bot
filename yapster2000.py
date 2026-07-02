@@ -25,8 +25,8 @@ from discord.ext import commands, tasks
 # python xsi_bot_full_setup_requiredpermissions.py
 # ============================================================
 
-VERSION = "XSI full setup build 2026-07-02 / trade-options-carmeet-gctf-facility-psn-selected-dropdowns"
-BUILD_TAG = "XSI-TRADE-OPTIONS-CARMEET-GCTF-FACILITY-PSN-SELECTED-DROPDOWNS"
+VERSION = "XSI full setup build 2026-07-02 / trade-options-carmeet-gctf-facility-psn-server-dropdowns"
+BUILD_TAG = "XSI-TRADE-OPTIONS-CARMEET-GCTF-FACILITY-PSN-SERVER-DROPDOWNS"
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
@@ -2589,8 +2589,13 @@ TRADE_METHOD_GCTF = "GCTF"
 PROOF_METHOD_SERVER = "Server"
 PROOF_METHOD_PHOTOS = "Photos"
 PSN_RE = re.compile(r"^[A-Za-z0-9_-]{3,16}$")
+PSN_TIMING_NOW = "Add PSN here"
+PSN_TIMING_TICKET = "Inside ticket"
 PHOTO_TIMING_NOW = "Add photos here"
 PHOTO_TIMING_TICKET = "Inside ticket"
+PROOF_CHOICE_SERVER_LINK_NOW = "Add server link here"
+PROOF_CHOICE_PHOTOS_NOW = "Add photos here"
+PROOF_CHOICE_PHOTOS_TICKET = "Photos inside ticket"
 
 GCTF_FACILITY_OPTIONS: list[tuple[str, str]] = [
     ("Paleto Bay Facility", "Paleto Bay & Mount Chiliad Region"),
@@ -2706,6 +2711,34 @@ async def find_recent_trade_proof(
     return {"ok": False, "kind": None, "summary": None}
 
 
+def psn_display_text(view: "TradePreCheckView") -> str:
+    if view.psn:
+        return str(view.psn).replace("`", "'")
+    if getattr(view, "psn_timing", None) == PSN_TIMING_TICKET:
+        return "Will provide inside ticket"
+    return "Not selected yet"
+
+
+def psn_dropdown_display(view: "TradePreCheckView") -> str | None:
+    if view.psn:
+        return f"PSN added: {view.psn}"
+    if getattr(view, "psn_timing", None) == PSN_TIMING_TICKET:
+        return "PSN inside ticket"
+    return None
+
+
+def proof_dropdown_display(view: "TradePreCheckView") -> str | None:
+    if view.proof_method == PROOF_METHOD_SERVER:
+        return "Server link added" if view.server_link else PROOF_CHOICE_SERVER_LINK_NOW
+    if view.proof_method == PROOF_METHOD_PHOTOS:
+        if view.photo_timing == PHOTO_TIMING_NOW:
+            return "Photos added here" if getattr(view, "photo_uploads", None) else PROOF_CHOICE_PHOTOS_NOW
+        if view.photo_timing == PHOTO_TIMING_TICKET:
+            return PROOF_CHOICE_PHOTOS_TICKET
+        return PROOF_METHOD_PHOTOS
+    return None
+
+
 def trade_precheck_message(view: "TradePreCheckView") -> str:
     trade_method = view.trade_method or "Not selected yet"
     facility = view.facility or "Required only for GCTF"
@@ -2716,15 +2749,13 @@ def trade_precheck_message(view: "TradePreCheckView") -> str:
         "",
         "Before I create this trade ticket, complete these steps:",
         "1. Pick **how you would like to trade** from the dropdown.",
-        "2. Press **Add your PSN** and enter your PlayStation name.",
+        "2. Use the **PSN** dropdown to add your PSN or choose to add it inside the ticket.",
         "3. If you pick **GCTF**, choose **where your facility is**.",
-        "4. Pick **Server** or **Photos** for proof.",
-        "5. If you pick **Server**, press **Add server link here** and paste the invite/link.",
-        "6. If you pick **Photos**, choose **Add photos here** or **Inside ticket**.",
-        "7. Press **Create trade ticket**.",
+        "4. Use the **Proof** dropdown to add a server link, add photos here, or choose photos inside the ticket.",
+        "5. Press **Create trade ticket**.",
         "",
         f"**Trade option:** `{trade_method}`",
-        f"**PSN:** `{str(view.psn or 'Not added yet').replace('`', "'")}`",
+        f"**PSN:** `{psn_display_text(view)}`",
         f"**Facility:** `{facility}`",
         f"**Proof:** `{proof_method}`",
     ]
@@ -2740,14 +2771,13 @@ def trade_precheck_message(view: "TradePreCheckView") -> str:
             lines.append(f"**Photos uploaded here:** `{len(photo_uploads)} file(s) saved`")
         elif view.photo_timing == PHOTO_TIMING_NOW:
             if hasattr(discord.ui, "FileUpload"):
-                lines.append("**Photo upload:** `Press Add photos here, or send images in this channel.`")
+                lines.append("**Photo upload:** `Choose Add photos here again, or send images in this channel.`")
             else:
                 lines.append("**Photo upload:** `Use Discord's + attachment button in this channel, then press Create.`")
         elif view.photo_timing == PHOTO_TIMING_TICKET:
             lines.append("**Photo upload:** `Photos will be added inside the ticket after it opens.`")
 
     return "\n".join(lines)
-
 
 class TradeMethodSelect(discord.ui.Select):
     def __init__(self, selected: str | None = None) -> None:
@@ -2818,29 +2848,43 @@ class GCTFFacilitySelect(discord.ui.Select):
         await interaction.response.edit_message(content=trade_precheck_message(parent), view=parent)
 
 
-class ProofMethodSelect(discord.ui.Select):
-    def __init__(self, selected: str | None = None) -> None:
+class ProofActionSelect(discord.ui.Select):
+    def __init__(self, selected_label: str | None = None) -> None:
         super().__init__(
-            placeholder=selected_dropdown_text(selected, "Proof type: Server link or Photos?"),
+            placeholder=selected_dropdown_text(selected_label, "Proof: server link or photos?"),
             min_values=1,
             max_values=1,
-            row=2,
+            row=3,
             options=[
                 discord.SelectOption(
-                    label=PROOF_METHOD_SERVER,
-                    value=PROOF_METHOD_SERVER,
-                    description="A server invite/link is required before the ticket opens",
+                    label=PROOF_CHOICE_SERVER_LINK_NOW,
+                    value=PROOF_CHOICE_SERVER_LINK_NOW,
+                    description="Paste the server invite/link before the ticket opens",
                     emoji="🔗",
                 ),
                 discord.SelectOption(
-                    label=PROOF_METHOD_PHOTOS,
-                    value=PROOF_METHOD_PHOTOS,
-                    description="Photos can be sent now or inside the ticket after it opens",
+                    label=PROOF_CHOICE_PHOTOS_NOW,
+                    value=PROOF_CHOICE_PHOTOS_NOW,
+                    description="Upload/send photo proof before creating the ticket",
                     emoji="📸",
+                ),
+                discord.SelectOption(
+                    label=PROOF_CHOICE_PHOTOS_TICKET,
+                    value=PROOF_CHOICE_PHOTOS_TICKET,
+                    description="Open the ticket first, then attach photos inside it",
+                    emoji="🎟️",
                 ),
             ],
         )
-        mark_select_option(self, selected)
+        if selected_label in {PROOF_CHOICE_SERVER_LINK_NOW, "Server link added"}:
+            for option in self.options:
+                option.default = option.value == PROOF_CHOICE_SERVER_LINK_NOW
+        elif selected_label in {PROOF_CHOICE_PHOTOS_NOW, "Photos added here"}:
+            for option in self.options:
+                option.default = option.value == PROOF_CHOICE_PHOTOS_NOW
+        elif selected_label == PROOF_CHOICE_PHOTOS_TICKET:
+            for option in self.options:
+                option.default = option.value == PROOF_CHOICE_PHOTOS_TICKET
 
     async def callback(self, interaction: discord.Interaction) -> None:
         parent = self.view
@@ -2851,15 +2895,43 @@ class ProofMethodSelect(discord.ui.Select):
             await interaction.response.send_message("❌ This proof dropdown was not opened for you.", ephemeral=True)
             return
 
-        selected_method = self.values[0]
-        if parent.proof_method != selected_method:
-            parent.server_link = None
+        selected_choice = self.values[0]
+        if selected_choice == PROOF_CHOICE_SERVER_LINK_NOW:
+            parent.proof_method = PROOF_METHOD_SERVER
             parent.photo_timing = None
             parent.photo_uploads = []
-        parent.proof_method = selected_method
-        mark_select_option(self, parent.proof_method)
-        parent.sync_proof_detail_controls()
-        await interaction.response.edit_message(content=trade_precheck_message(parent), view=parent)
+            await interaction.response.send_modal(ServerLinkModal(parent))
+            return
+
+        if selected_choice == PROOF_CHOICE_PHOTOS_NOW:
+            parent.proof_method = PROOF_METHOD_PHOTOS
+            parent.photo_timing = PHOTO_TIMING_NOW
+            parent.server_link = None
+            parent.photo_uploads = []
+            if not hasattr(discord.ui, "FileUpload"):
+                parent.sync_proof_select()
+                await interaction.response.edit_message(
+                    content=(
+                        trade_precheck_message(parent)
+                        + "\n\n⚠️ Your installed discord.py version does not support photo uploads inside dropdown modals yet. "
+                        "Send the photos in this channel with Discord's **+** button, then press **Create trade ticket**."
+                    ),
+                    view=parent,
+                )
+                return
+            await interaction.response.send_modal(PhotoUploadModal(parent))
+            return
+
+        if selected_choice == PROOF_CHOICE_PHOTOS_TICKET:
+            parent.proof_method = PROOF_METHOD_PHOTOS
+            parent.photo_timing = PHOTO_TIMING_TICKET
+            parent.server_link = None
+            parent.photo_uploads = []
+            parent.sync_proof_select()
+            await interaction.response.edit_message(content=trade_precheck_message(parent), view=parent)
+            return
+
+        await interaction.response.send_message("❌ Please choose a valid proof option.", ephemeral=True)
 
 
 class ServerLinkModal(discord.ui.Modal, title="Add server link"):
@@ -2892,24 +2964,8 @@ class ServerLinkModal(discord.ui.Modal, title="Add server link"):
         self.parent.server_link = truncate_discord_text(link, 300, "server link")
         self.parent.photo_timing = None
         self.parent.photo_uploads = []
-        self.parent.sync_proof_detail_controls()
+        self.parent.sync_proof_select()
         await interaction.response.edit_message(content=trade_precheck_message(self.parent), view=self.parent)
-
-
-class AddServerLinkButton(discord.ui.Button):
-    def __init__(self) -> None:
-        super().__init__(label="🔗 Add server link here", style=discord.ButtonStyle.blurple, row=3)
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        parent = self.view
-        if not isinstance(parent, TradePreCheckView):
-            await interaction.response.send_message("❌ This trade screen expired. Click the ticket button again.", ephemeral=True)
-            return
-        if interaction.user.id != parent.requester_id:
-            await interaction.response.send_message("❌ This server-link button was not opened for you.", ephemeral=True)
-            return
-
-        await interaction.response.send_modal(ServerLinkModal(parent))
 
 
 class PSNModal(discord.ui.Modal, title="Add your PSN"):
@@ -2939,12 +2995,39 @@ class PSNModal(discord.ui.Modal, title="Add your PSN"):
             return
 
         self.parent.psn = clean_psn
+        self.parent.psn_timing = PSN_TIMING_NOW
+        self.parent.sync_psn_select()
         await interaction.response.edit_message(content=trade_precheck_message(self.parent), view=self.parent)
 
 
-class AddPSNButton(discord.ui.Button):
-    def __init__(self) -> None:
-        super().__init__(label="🎮 Add your PSN", style=discord.ButtonStyle.blurple, row=4)
+class PSNActionSelect(discord.ui.Select):
+    def __init__(self, selected_label: str | None = None) -> None:
+        super().__init__(
+            placeholder=selected_dropdown_text(selected_label, "PSN: add here or inside ticket?"),
+            min_values=1,
+            max_values=1,
+            row=2,
+            options=[
+                discord.SelectOption(
+                    label=PSN_TIMING_NOW,
+                    value=PSN_TIMING_NOW,
+                    description="Enter your PSN before the ticket opens",
+                    emoji="🎮",
+                ),
+                discord.SelectOption(
+                    label=PSN_TIMING_TICKET,
+                    value=PSN_TIMING_TICKET,
+                    description="Open the ticket and provide your PSN inside it",
+                    emoji="🎟️",
+                ),
+            ],
+        )
+        if selected_label and "inside ticket" in selected_label.lower():
+            for option in self.options:
+                option.default = option.value == PSN_TIMING_TICKET
+        elif selected_label:
+            for option in self.options:
+                option.default = option.value == PSN_TIMING_NOW
 
     async def callback(self, interaction: discord.Interaction) -> None:
         parent = self.view
@@ -2952,11 +3035,23 @@ class AddPSNButton(discord.ui.Button):
             await interaction.response.send_message("❌ This trade screen expired. Click the ticket button again.", ephemeral=True)
             return
         if interaction.user.id != parent.requester_id:
-            await interaction.response.send_message("❌ This PSN button was not opened for you.", ephemeral=True)
+            await interaction.response.send_message("❌ This PSN dropdown was not opened for you.", ephemeral=True)
             return
 
-        await interaction.response.send_modal(PSNModal(parent))
+        selected_choice = self.values[0]
+        if selected_choice == PSN_TIMING_NOW:
+            parent.psn_timing = PSN_TIMING_NOW
+            await interaction.response.send_modal(PSNModal(parent))
+            return
 
+        if selected_choice == PSN_TIMING_TICKET:
+            parent.psn = None
+            parent.psn_timing = PSN_TIMING_TICKET
+            parent.sync_psn_select()
+            await interaction.response.edit_message(content=trade_precheck_message(parent), view=parent)
+            return
+
+        await interaction.response.send_message("❌ Please choose a valid PSN option.", ephemeral=True)
 
 class PhotoUploadModal(discord.ui.Modal, title="Add photo proof"):
     def __init__(self, parent: "TradePreCheckView") -> None:
@@ -3009,7 +3104,7 @@ class PhotoUploadModal(discord.ui.Modal, title="Add photo proof"):
             }
             for attachment in image_attachments
         ]
-        self.parent.sync_proof_detail_controls()
+        self.parent.sync_proof_select()
         await interaction.response.edit_message(content=trade_precheck_message(self.parent), view=self.parent)
 
 
@@ -3098,12 +3193,13 @@ class TradePreCheckView(discord.ui.View):
         self.facility: str | None = None
         self.proof_method: str | None = None
         self.psn: str | None = None
+        self.psn_timing: str | None = None
         self.server_link: str | None = None
         self.photo_timing: str | None = None
         self.photo_uploads: list[dict[str, str]] = []
         self.add_item(TradeMethodSelect(self.trade_method))
-        self.add_item(ProofMethodSelect(self.proof_method))
-        self.add_item(AddPSNButton())
+        self.add_item(PSNActionSelect(psn_dropdown_display(self)))
+        self.add_item(ProofActionSelect(proof_dropdown_display(self)))
 
     def sync_facility_select(self) -> None:
         for item in list(self.children):
@@ -3113,17 +3209,21 @@ class TradePreCheckView(discord.ui.View):
         if self.trade_method == TRADE_METHOD_GCTF:
             self.add_item(GCTFFacilitySelect(self.facility))
 
-    def sync_proof_detail_controls(self) -> None:
+    def sync_psn_select(self) -> None:
         for item in list(self.children):
-            if isinstance(item, (AddServerLinkButton, PhotoProofTimingSelect, AddPhotoProofButton)):
+            if isinstance(item, PSNActionSelect):
                 self.remove_item(item)
+        self.add_item(PSNActionSelect(psn_dropdown_display(self)))
 
-        if self.proof_method == PROOF_METHOD_SERVER:
-            self.add_item(AddServerLinkButton())
-        elif self.proof_method == PROOF_METHOD_PHOTOS:
-            self.add_item(PhotoProofTimingSelect(self.photo_timing))
-            if self.photo_timing == PHOTO_TIMING_NOW:
-                self.add_item(AddPhotoProofButton())
+    def sync_proof_select(self) -> None:
+        for item in list(self.children):
+            if isinstance(item, ProofActionSelect):
+                self.remove_item(item)
+        self.add_item(ProofActionSelect(proof_dropdown_display(self)))
+
+    # Compatibility for older helper classes that are no longer added to the view.
+    def sync_proof_detail_controls(self) -> None:
+        self.sync_proof_select()
 
     @discord.ui.button(label="✅ Create trade ticket", style=discord.ButtonStyle.green, row=4)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -3142,9 +3242,9 @@ class TradePreCheckView(discord.ui.View):
             )
             return
 
-        if not self.psn:
+        if not self.psn and self.psn_timing != PSN_TIMING_TICKET:
             await interaction.response.send_message(
-                "❌ Please press **🎮 Add your PSN** and enter your PlayStation name before creating the trade ticket.",
+                "❌ Please use the **PSN** dropdown and choose **Add PSN here** or **Inside ticket** before creating the trade ticket.",
                 ephemeral=True,
             )
             return
@@ -3158,7 +3258,7 @@ class TradePreCheckView(discord.ui.View):
 
         if self.proof_method not in {PROOF_METHOD_SERVER, PROOF_METHOD_PHOTOS}:
             await interaction.response.send_message(
-                "❌ Please choose **Server** or **Photos** for proof first.",
+                "❌ Please use the **Proof** dropdown and choose a server-link or photo-proof option first.",
                 ephemeral=True,
             )
             return
@@ -3172,7 +3272,7 @@ class TradePreCheckView(discord.ui.View):
                 if not proof.get("ok"):
                     await interaction.response.send_message(
                         "❌ You selected **Server** proof, so a server invite/link is required before I create the ticket.\n\n"
-                        "Press **🔗 Add server link here**, paste the link, then press **Create trade ticket** again.",
+                        "Use the **Proof** dropdown, choose **Add server link here**, paste the link, then press **Create trade ticket** again.",
                         ephemeral=True,
                     )
                     return
@@ -3180,7 +3280,7 @@ class TradePreCheckView(discord.ui.View):
         else:
             if self.photo_timing not in {PHOTO_TIMING_NOW, PHOTO_TIMING_TICKET}:
                 await interaction.response.send_message(
-                    "❌ You selected **Photos** proof, so please choose whether to upload photos **now** or **inside the ticket** first.",
+                    "❌ You selected **Photos** proof, so please choose **Add photos here** or **Photos inside ticket** from the Proof dropdown first.",
                     ephemeral=True,
                 )
                 return
@@ -3197,8 +3297,8 @@ class TradePreCheckView(discord.ui.View):
                 if not proof.get("ok"):
                     await interaction.response.send_message(
                         "❌ You chose **Add photos here**, but I could not see image proof yet.\n\n"
-                        "Press **📸 Add photos here** if your bot version supports it, or use Discord's **+ attachment button** in this channel.\n"
-                        "Then press **Create trade ticket** again, or change the photo option to **Inside ticket**.",
+                        "Use the **Proof** dropdown and choose **Add photos here** again if your bot version supports it, or use Discord's **+ attachment button** in this channel.\n"
+                        "Then press **Create trade ticket** again, or change the proof option to **Photos inside ticket**.",
                         ephemeral=True,
                     )
                     return
@@ -3210,12 +3310,15 @@ class TradePreCheckView(discord.ui.View):
                     proof_summary = "Photo proof selected. User chose to attach photos inside this ticket after it is created."
 
         ticket_kwargs = dict(self.ticket_kwargs)
+        psn_summary = self.psn if self.psn else "User chose to provide PSN inside the ticket."
         trade_lines = [
             f"✅ {proof_summary}",
             f"Trade option: {self.trade_method}",
-            f"PSN: {self.psn}",
+            f"PSN: {psn_summary}",
             f"Proof method: {self.proof_method}",
         ]
+        if self.psn_timing:
+            trade_lines.append(f"PSN option: {self.psn_timing}")
         if self.proof_method == PROOF_METHOD_PHOTOS and self.photo_timing:
             trade_lines.append(f"Photo option: {self.photo_timing}")
         if self.trade_method == TRADE_METHOD_GCTF and self.facility:
@@ -3231,7 +3334,6 @@ class TradePreCheckView(discord.ui.View):
             item.disabled = True
 
         await create_ticket_channel(interaction, **ticket_kwargs)
-
 
 class TicketPanelButton(discord.ui.Button):
     def __init__(self, index: int, config: dict[str, Any] | None = None) -> None:
@@ -6906,4 +7008,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
