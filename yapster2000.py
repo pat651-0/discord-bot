@@ -2586,6 +2586,8 @@ DISCORD_INVITE_RE = re.compile(
 URL_RE = re.compile(r"https?://[^\s<>()]+", flags=re.IGNORECASE)
 TRADE_METHOD_CARMEET = "Carmeet"
 TRADE_METHOD_GCTF = "GCTF"
+PROOF_METHOD_SERVER = "Server"
+PROOF_METHOD_PHOTOS = "Photos"
 
 GCTF_FACILITY_OPTIONS: list[tuple[str, str]] = [
     ("Paleto Bay Facility", "Paleto Bay & Mount Chiliad Region"),
@@ -2641,26 +2643,39 @@ def extract_server_link(text: str) -> str | None:
     return None
 
 
-async def find_recent_trade_proof(channel: discord.TextChannel, user_id: int, limit: int = 15) -> dict[str, str | bool | None]:
+async def find_recent_trade_proof(
+    channel: discord.TextChannel,
+    user_id: int,
+    limit: int = 15,
+    proof_kind: str | None = None,
+) -> dict[str, str | bool | None]:
+    """Look for proof messages the user sent near the trade-check menu.
+
+    proof_kind can be:
+    - None: accept either image proof or a server link
+    - PROOF_METHOD_PHOTOS: accept image attachments only
+    - PROOF_METHOD_SERVER: accept server links only
+    """
     async for message in channel.history(limit=limit):
         if message.author.id != user_id:
             continue
 
-        if message_has_image_attachment(message):
+        if proof_kind in {None, PROOF_METHOD_PHOTOS} and message_has_image_attachment(message):
             return {
                 "ok": True,
                 "kind": "images",
-                "summary": "Image proof was attached before ticket creation.",
+                "summary": "Photo proof was attached before ticket creation.",
             }
 
-        server_link = extract_server_link(message.content)
-        if server_link:
-            clean_link = truncate_discord_text(server_link, 180, "server link")
-            return {
-                "ok": True,
-                "kind": "server_link",
-                "summary": f"Server link provided before ticket creation: {clean_link}",
-            }
+        if proof_kind in {None, PROOF_METHOD_SERVER}:
+            server_link = extract_server_link(message.content)
+            if server_link:
+                clean_link = truncate_discord_text(server_link, 180, "server link")
+                return {
+                    "ok": True,
+                    "kind": "server_link",
+                    "summary": f"Server link provided before ticket creation: {clean_link}",
+                }
 
     return {"ok": False, "kind": None, "summary": None}
 
@@ -2668,15 +2683,19 @@ async def find_recent_trade_proof(channel: discord.TextChannel, user_id: int, li
 def trade_precheck_message(view: "TradePreCheckView") -> str:
     trade_method = view.trade_method or "Not selected yet"
     facility = view.facility or "Required only for GCTF"
+    proof_method = view.proof_method or "Not selected yet"
     return (
         "📸🔗 **Trade ticket check**\n\n"
         "Before I create this trade ticket, complete these steps:\n"
         "1. Pick **how you would like to trade** from the dropdown.\n"
         "2. If you pick **GCTF**, choose **where your facility is**.\n"
-        "3. Send **image proof of your cars/server** or **a server invite/link** in this channel.\n"
-        "4. Press **Create trade ticket**.\n\n"
+        "3. Pick **Server** or **Photos** for proof.\n"
+        "4. If you pick **Server**, send your server invite/link in this channel before creating the ticket.\n"
+        "5. If you pick **Photos**, you can attach photos now or inside the ticket after it opens.\n"
+        "6. Press **Create trade ticket**.\n\n"
         f"**Trade option:** `{trade_method}`\n"
-        f"**Facility:** `{facility}`"
+        f"**Facility:** `{facility}`\n"
+        f"**Proof:** `{proof_method}`"
     )
 
 
@@ -2745,6 +2764,42 @@ class GCTFFacilitySelect(discord.ui.Select):
         await interaction.response.edit_message(content=trade_precheck_message(parent), view=parent)
 
 
+class ProofMethodSelect(discord.ui.Select):
+    def __init__(self) -> None:
+        super().__init__(
+            placeholder="Proof type: Server link or Photos?",
+            min_values=1,
+            max_values=1,
+            row=2,
+            options=[
+                discord.SelectOption(
+                    label=PROOF_METHOD_SERVER,
+                    value=PROOF_METHOD_SERVER,
+                    description="A server invite/link is required before the ticket opens",
+                    emoji="🔗",
+                ),
+                discord.SelectOption(
+                    label=PROOF_METHOD_PHOTOS,
+                    value=PROOF_METHOD_PHOTOS,
+                    description="Photos can be sent now or inside the ticket after it opens",
+                    emoji="📸",
+                ),
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        parent = self.view
+        if not isinstance(parent, TradePreCheckView):
+            await interaction.response.send_message("❌ This trade screen expired. Click the ticket button again.", ephemeral=True)
+            return
+        if interaction.user.id != parent.requester_id:
+            await interaction.response.send_message("❌ This proof dropdown was not opened for you.", ephemeral=True)
+            return
+
+        parent.proof_method = self.values[0]
+        await interaction.response.edit_message(content=trade_precheck_message(parent), view=parent)
+
+
 class TradePreCheckView(discord.ui.View):
     def __init__(self, requester_id: int, ticket_kwargs: dict[str, Any]) -> None:
         super().__init__(timeout=180)
@@ -2752,7 +2807,9 @@ class TradePreCheckView(discord.ui.View):
         self.ticket_kwargs = ticket_kwargs
         self.trade_method: str | None = None
         self.facility: str | None = None
+        self.proof_method: str | None = None
         self.add_item(TradeMethodSelect())
+        self.add_item(ProofMethodSelect())
 
     def sync_facility_select(self) -> None:
         for item in list(self.children):
@@ -2786,22 +2843,35 @@ class TradePreCheckView(discord.ui.View):
             )
             return
 
-        proof = await find_recent_trade_proof(interaction.channel, interaction.user.id)
-        if not proof.get("ok"):
+        if self.proof_method not in {PROOF_METHOD_SERVER, PROOF_METHOD_PHOTOS}:
             await interaction.response.send_message(
-                "❌ Before I create this trade ticket, please send **one** of these in this channel:\n"
-                "• image(s) of your cars/server\n"
-                "• a link/invite to your server\n\n"
-                "Then press **Create trade ticket** again.",
+                "❌ Please choose **Server** or **Photos** for proof first.",
                 ephemeral=True,
             )
             return
 
+        if self.proof_method == PROOF_METHOD_SERVER:
+            proof = await find_recent_trade_proof(interaction.channel, interaction.user.id, proof_kind=PROOF_METHOD_SERVER)
+            if not proof.get("ok"):
+                await interaction.response.send_message(
+                    "❌ You selected **Server** proof, so a server invite/link is required before I create the ticket.\n\n"
+                    "Please send your server invite/link in this channel, then press **Create trade ticket** again.",
+                    ephemeral=True,
+                )
+                return
+            proof_summary = str(proof.get("summary") or "Server link confirmed before ticket creation.")
+        else:
+            proof = await find_recent_trade_proof(interaction.channel, interaction.user.id, proof_kind=PROOF_METHOD_PHOTOS)
+            if proof.get("ok"):
+                proof_summary = str(proof.get("summary") or "Photo proof was attached before ticket creation.")
+            else:
+                proof_summary = "Photo proof selected. User can attach photos inside this ticket after it is created."
+
         ticket_kwargs = dict(self.ticket_kwargs)
-        proof_summary = str(proof.get("summary") or "Trade proof confirmed before ticket creation.")
         trade_lines = [
             f"✅ {proof_summary}",
             f"Trade option: {self.trade_method}",
+            f"Proof method: {self.proof_method}",
         ]
         if self.trade_method == TRADE_METHOD_GCTF and self.facility:
             trade_lines.append(f"Facility: {self.facility}")
