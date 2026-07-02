@@ -25,8 +25,8 @@ from discord.ext import commands, tasks
 # python xsi_bot_full_setup_requiredpermissions.py
 # ============================================================
 
-VERSION = "XSI full setup build 2026-07-02 / trade-options-carmeet-gctf-facility-psn"
-BUILD_TAG = "XSI-TRADE-OPTIONS-CARMEET-GCTF-FACILITY-PSN"
+VERSION = "XSI full setup build 2026-07-02 / trade-options-carmeet-gctf-facility-psn-selected-dropdowns"
+BUILD_TAG = "XSI-TRADE-OPTIONS-CARMEET-GCTF-FACILITY-PSN-SELECTED-DROPDOWNS"
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
@@ -2654,6 +2654,21 @@ def valid_psn(value: Any) -> bool:
     return bool(PSN_RE.fullmatch(normalize_psn(value)))
 
 
+def selected_dropdown_text(value: Any, fallback: str) -> str:
+    clean_value = str(value or "").strip()
+    if not clean_value:
+        return fallback
+    return truncate_discord_text(f"✅ Selected: {clean_value}", 100, fallback)
+
+
+def mark_select_option(select: discord.ui.Select, selected_value: Any) -> None:
+    selected = str(selected_value or "").strip()
+    if selected:
+        select.placeholder = selected_dropdown_text(selected, str(select.placeholder or "Selected"))
+    for option in select.options:
+        option.default = str(option.value) == selected
+
+
 async def find_recent_trade_proof(
     channel: discord.TextChannel,
     user_id: int,
@@ -2735,9 +2750,9 @@ def trade_precheck_message(view: "TradePreCheckView") -> str:
 
 
 class TradeMethodSelect(discord.ui.Select):
-    def __init__(self) -> None:
+    def __init__(self, selected: str | None = None) -> None:
         super().__init__(
-            placeholder="How would you like to trade?",
+            placeholder=selected_dropdown_text(selected, "How would you like to trade?"),
             min_values=1,
             max_values=1,
             row=0,
@@ -2756,6 +2771,7 @@ class TradeMethodSelect(discord.ui.Select):
                 ),
             ],
         )
+        mark_select_option(self, selected)
 
     async def callback(self, interaction: discord.Interaction) -> None:
         parent = self.view
@@ -2767,6 +2783,7 @@ class TradeMethodSelect(discord.ui.Select):
             return
 
         parent.trade_method = self.values[0]
+        mark_select_option(self, parent.trade_method)
         if parent.trade_method != TRADE_METHOD_GCTF:
             parent.facility = None
         parent.sync_facility_select()
@@ -2774,9 +2791,9 @@ class TradeMethodSelect(discord.ui.Select):
 
 
 class GCTFFacilitySelect(discord.ui.Select):
-    def __init__(self) -> None:
+    def __init__(self, selected: str | None = None) -> None:
         super().__init__(
-            placeholder="GCTF selected — where is your facility?",
+            placeholder=selected_dropdown_text(selected, "GCTF selected — where is your facility?"),
             min_values=1,
             max_values=1,
             row=1,
@@ -2785,6 +2802,7 @@ class GCTFFacilitySelect(discord.ui.Select):
                 for name, region in GCTF_FACILITY_OPTIONS
             ],
         )
+        mark_select_option(self, selected)
 
     async def callback(self, interaction: discord.Interaction) -> None:
         parent = self.view
@@ -2796,13 +2814,14 @@ class GCTFFacilitySelect(discord.ui.Select):
             return
 
         parent.facility = self.values[0]
+        mark_select_option(self, parent.facility)
         await interaction.response.edit_message(content=trade_precheck_message(parent), view=parent)
 
 
 class ProofMethodSelect(discord.ui.Select):
-    def __init__(self) -> None:
+    def __init__(self, selected: str | None = None) -> None:
         super().__init__(
-            placeholder="Proof type: Server link or Photos?",
+            placeholder=selected_dropdown_text(selected, "Proof type: Server link or Photos?"),
             min_values=1,
             max_values=1,
             row=2,
@@ -2821,6 +2840,7 @@ class ProofMethodSelect(discord.ui.Select):
                 ),
             ],
         )
+        mark_select_option(self, selected)
 
     async def callback(self, interaction: discord.Interaction) -> None:
         parent = self.view
@@ -2837,6 +2857,7 @@ class ProofMethodSelect(discord.ui.Select):
             parent.photo_timing = None
             parent.photo_uploads = []
         parent.proof_method = selected_method
+        mark_select_option(self, parent.proof_method)
         parent.sync_proof_detail_controls()
         await interaction.response.edit_message(content=trade_precheck_message(parent), view=parent)
 
@@ -3025,9 +3046,9 @@ class AddPhotoProofButton(discord.ui.Button):
 
 
 class PhotoProofTimingSelect(discord.ui.Select):
-    def __init__(self) -> None:
+    def __init__(self, selected: str | None = None) -> None:
         super().__init__(
-            placeholder="Photos: add here or inside ticket?",
+            placeholder=selected_dropdown_text(selected, "Photos: add here or inside ticket?"),
             min_values=1,
             max_values=1,
             row=3,
@@ -3046,6 +3067,7 @@ class PhotoProofTimingSelect(discord.ui.Select):
                 ),
             ],
         )
+        mark_select_option(self, selected)
 
     async def callback(self, interaction: discord.Interaction) -> None:
         parent = self.view
@@ -3061,6 +3083,7 @@ class PhotoProofTimingSelect(discord.ui.Select):
         if parent.photo_timing != selected_timing:
             parent.photo_uploads = []
         parent.photo_timing = selected_timing
+        mark_select_option(self, parent.photo_timing)
         parent.server_link = None
         parent.sync_proof_detail_controls()
         await interaction.response.edit_message(content=trade_precheck_message(parent), view=parent)
@@ -3078,8 +3101,8 @@ class TradePreCheckView(discord.ui.View):
         self.server_link: str | None = None
         self.photo_timing: str | None = None
         self.photo_uploads: list[dict[str, str]] = []
-        self.add_item(TradeMethodSelect())
-        self.add_item(ProofMethodSelect())
+        self.add_item(TradeMethodSelect(self.trade_method))
+        self.add_item(ProofMethodSelect(self.proof_method))
         self.add_item(AddPSNButton())
 
     def sync_facility_select(self) -> None:
@@ -3088,7 +3111,7 @@ class TradePreCheckView(discord.ui.View):
                 self.remove_item(item)
 
         if self.trade_method == TRADE_METHOD_GCTF:
-            self.add_item(GCTFFacilitySelect())
+            self.add_item(GCTFFacilitySelect(self.facility))
 
     def sync_proof_detail_controls(self) -> None:
         for item in list(self.children):
@@ -3098,7 +3121,7 @@ class TradePreCheckView(discord.ui.View):
         if self.proof_method == PROOF_METHOD_SERVER:
             self.add_item(AddServerLinkButton())
         elif self.proof_method == PROOF_METHOD_PHOTOS:
-            self.add_item(PhotoProofTimingSelect())
+            self.add_item(PhotoProofTimingSelect(self.photo_timing))
             if self.photo_timing == PHOTO_TIMING_NOW:
                 self.add_item(AddPhotoProofButton())
 
@@ -6883,3 +6906,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
