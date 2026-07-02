@@ -2580,10 +2580,9 @@ class RecordPickerView(discord.ui.View):
 
 IMAGE_ATTACHMENT_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".heic", ".heif")
 DISCORD_INVITE_RE = re.compile(
-    r"(?:https?://)?(?:www\.)?(?:discord\.gg|discord(?:app)?\.com/invite)/[A-Za-z0-9-]+",
+    r"(?<![A-Za-z0-9./:_-])(?:https?://)?(?:www\.)?(?:discord\.gg|discord(?:app)?\.com/invite)/[A-Za-z0-9_-]+",
     flags=re.IGNORECASE,
 )
-URL_RE = re.compile(r"https?://[^\s<>()]+", flags=re.IGNORECASE)
 TRADE_METHOD_CARMEET = "Carmeet"
 TRADE_METHOD_GCTF = "GCTF"
 PROOF_METHOD_SERVER = "Server"
@@ -2593,7 +2592,7 @@ PSN_TIMING_NOW = "Add PSN here"
 PSN_TIMING_TICKET = "Inside ticket"
 PHOTO_TIMING_NOW = "Add photos here"
 PHOTO_TIMING_TICKET = "Inside ticket"
-PROOF_CHOICE_SERVER_LINK_NOW = "Add server link here"
+PROOF_CHOICE_SERVER_LINK_NOW = "Add Discord invite here"
 PROOF_CHOICE_PHOTOS_NOW = "Add photos here"
 PROOF_CHOICE_PHOTOS_TICKET = "Photos inside ticket"
 
@@ -2637,17 +2636,20 @@ def message_has_image_attachment(message: discord.Message) -> bool:
 
 
 def extract_server_link(text: str) -> str | None:
+    """Return a Discord invite link only.
+
+    Accepted formats include:
+    - discord.gg/example
+    - https://discord.gg/example
+    - https://discord.com/invite/example
+    - https://discordapp.com/invite/example
+
+    Any non-Discord link is rejected.
+    """
     content = str(text or "")
     invite_match = DISCORD_INVITE_RE.search(content)
     if invite_match:
         return invite_match.group(0)
-
-    # Fallback: accept any normal link as a server link so admins can verify it.
-    # Discord invites are preferred above, but this keeps the gate flexible.
-    url_match = URL_RE.search(content)
-    if url_match:
-        return url_match.group(0)
-
     return None
 
 
@@ -2683,9 +2685,9 @@ async def find_recent_trade_proof(
     """Look for proof messages the user sent near the trade-check menu.
 
     proof_kind can be:
-    - None: accept either image proof or a server link
+    - None: accept either image proof or a Discord invite link
     - PROOF_METHOD_PHOTOS: accept image attachments only
-    - PROOF_METHOD_SERVER: accept server links only
+    - PROOF_METHOD_SERVER: accept Discord invite links only
     """
     async for message in channel.history(limit=limit):
         if message.author.id != user_id:
@@ -2701,11 +2703,11 @@ async def find_recent_trade_proof(
         if proof_kind in {None, PROOF_METHOD_SERVER}:
             server_link = extract_server_link(message.content)
             if server_link:
-                clean_link = truncate_discord_text(server_link, 180, "server link")
+                clean_link = truncate_discord_text(server_link, 180, "Discord invite")
                 return {
                     "ok": True,
                     "kind": "server_link",
-                    "summary": f"Server link provided before ticket creation: {clean_link}",
+                    "summary": f"Discord invite provided before ticket creation: {clean_link}",
                 }
 
     return {"ok": False, "kind": None, "summary": None}
@@ -2729,7 +2731,7 @@ def psn_dropdown_display(view: "TradePreCheckView") -> str | None:
 
 def proof_dropdown_display(view: "TradePreCheckView") -> str | None:
     if view.proof_method == PROOF_METHOD_SERVER:
-        return "Server link added" if view.server_link else PROOF_CHOICE_SERVER_LINK_NOW
+        return "Discord invite added" if view.server_link else PROOF_CHOICE_SERVER_LINK_NOW
     if view.proof_method == PROOF_METHOD_PHOTOS:
         if view.photo_timing == PHOTO_TIMING_NOW:
             return "Photos added here" if getattr(view, "photo_uploads", None) else PROOF_CHOICE_PHOTOS_NOW
@@ -2751,7 +2753,7 @@ def trade_precheck_message(view: "TradePreCheckView") -> str:
         "1. Pick **how you would like to trade** from the dropdown.",
         "2. Use the **PSN** dropdown to add your PSN or choose to add it inside the ticket.",
         "3. If you pick **GCTF**, choose **where your facility is**.",
-        "4. Use the **Proof** dropdown to add a server link, add photos here, or choose photos inside the ticket.",
+        "4. Use the **Proof** dropdown to add a Discord invite, add photos here, or choose photos inside the ticket.",
         "5. Press **Create trade ticket**.",
         "",
         f"**Trade option:** `{trade_method}`",
@@ -2762,7 +2764,7 @@ def trade_precheck_message(view: "TradePreCheckView") -> str:
 
     if view.proof_method == PROOF_METHOD_SERVER:
         server_link = str(view.server_link or "Not added yet").replace("`", "'")
-        lines.append(f"**Server link:** `{truncate_discord_text(server_link, 180, 'server link')}`")
+        lines.append(f"**Discord invite:** `{truncate_discord_text(server_link, 180, 'Discord invite')}`")
     elif view.proof_method == PROOF_METHOD_PHOTOS:
         photo_timing = str(view.photo_timing or "Not selected yet").replace("`", "'")
         lines.append(f"**Photo option:** `{photo_timing}`")
@@ -2851,7 +2853,7 @@ class GCTFFacilitySelect(discord.ui.Select):
 class ProofActionSelect(discord.ui.Select):
     def __init__(self, selected_label: str | None = None) -> None:
         super().__init__(
-            placeholder=selected_dropdown_text(selected_label, "Proof: server link or photos?"),
+            placeholder=selected_dropdown_text(selected_label, "Proof: Discord invite or photos?"),
             min_values=1,
             max_values=1,
             row=3,
@@ -2859,7 +2861,7 @@ class ProofActionSelect(discord.ui.Select):
                 discord.SelectOption(
                     label=PROOF_CHOICE_SERVER_LINK_NOW,
                     value=PROOF_CHOICE_SERVER_LINK_NOW,
-                    description="Paste the server invite/link before the ticket opens",
+                    description="Paste a Discord invite before the ticket opens",
                     emoji="🔗",
                 ),
                 discord.SelectOption(
@@ -2876,7 +2878,7 @@ class ProofActionSelect(discord.ui.Select):
                 ),
             ],
         )
-        if selected_label in {PROOF_CHOICE_SERVER_LINK_NOW, "Server link added"}:
+        if selected_label in {PROOF_CHOICE_SERVER_LINK_NOW, "Discord invite added"}:
             for option in self.options:
                 option.default = option.value == PROOF_CHOICE_SERVER_LINK_NOW
         elif selected_label in {PROOF_CHOICE_PHOTOS_NOW, "Photos added here"}:
@@ -2934,9 +2936,9 @@ class ProofActionSelect(discord.ui.Select):
         await interaction.response.send_message("❌ Please choose a valid proof option.", ephemeral=True)
 
 
-class ServerLinkModal(discord.ui.Modal, title="Add server link"):
+class ServerLinkModal(discord.ui.Modal, title="Add Discord invite"):
     server_link = discord.ui.TextInput(
-        label="Server invite/link",
+        label="Discord invite/link",
         placeholder="https://discord.gg/yourserver",
         required=True,
         max_length=300,
@@ -2949,19 +2951,19 @@ class ServerLinkModal(discord.ui.Modal, title="Add server link"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.parent.requester_id:
-            await interaction.response.send_message("❌ This server-link box was not opened for you.", ephemeral=True)
+            await interaction.response.send_message("❌ This Discord-invite box was not opened for you.", ephemeral=True)
             return
 
         link = extract_server_link(str(self.server_link.value))
         if not link:
             await interaction.response.send_message(
-                "❌ Please paste a valid server invite/link, for example `https://discord.gg/example`.",
+                "❌ Please paste a valid Discord invite only, for example `https://discord.gg/example`. Other links are not accepted.",
                 ephemeral=True,
             )
             return
 
         self.parent.proof_method = PROOF_METHOD_SERVER
-        self.parent.server_link = truncate_discord_text(link, 300, "server link")
+        self.parent.server_link = truncate_discord_text(link, 300, "Discord invite")
         self.parent.photo_timing = None
         self.parent.photo_uploads = []
         self.parent.sync_proof_select()
@@ -3258,25 +3260,25 @@ class TradePreCheckView(discord.ui.View):
 
         if self.proof_method not in {PROOF_METHOD_SERVER, PROOF_METHOD_PHOTOS}:
             await interaction.response.send_message(
-                "❌ Please use the **Proof** dropdown and choose a server-link or photo-proof option first.",
+                "❌ Please use the **Proof** dropdown and choose a Discord-invite or photo-proof option first.",
                 ephemeral=True,
             )
             return
 
         if self.proof_method == PROOF_METHOD_SERVER:
             if self.server_link:
-                clean_link = truncate_discord_text(str(self.server_link), 180, "server link")
-                proof_summary = f"Server link added in trade-check menu: {clean_link}"
+                clean_link = truncate_discord_text(str(self.server_link), 180, "Discord invite")
+                proof_summary = f"Discord invite added in trade-check menu: {clean_link}"
             else:
                 proof = await find_recent_trade_proof(interaction.channel, interaction.user.id, proof_kind=PROOF_METHOD_SERVER)
                 if not proof.get("ok"):
                     await interaction.response.send_message(
-                        "❌ You selected **Server** proof, so a server invite/link is required before I create the ticket.\n\n"
-                        "Use the **Proof** dropdown, choose **Add server link here**, paste the link, then press **Create trade ticket** again.",
+                        "❌ You selected **Server** proof, so a Discord invite/link is required before I create the ticket.\n\n"
+                        "Use the **Proof** dropdown, choose **Add Discord invite here**, paste the Discord invite, then press **Create trade ticket** again.",
                         ephemeral=True,
                     )
                     return
-                proof_summary = str(proof.get("summary") or "Server link confirmed before ticket creation.")
+                proof_summary = str(proof.get("summary") or "Discord invite confirmed before ticket creation.")
         else:
             if self.photo_timing not in {PHOTO_TIMING_NOW, PHOTO_TIMING_TICKET}:
                 await interaction.response.send_message(
@@ -7008,3 +7010,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
