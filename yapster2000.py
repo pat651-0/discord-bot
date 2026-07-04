@@ -8,6 +8,8 @@ import os
 import random
 import re
 import time
+import urllib.error
+import urllib.request
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -25,8 +27,8 @@ from discord.ext import commands, tasks
 # python xsi_bot_full_setup_requiredpermissions.py
 # ============================================================
 
-VERSION = "XSI full setup build 2026-07-02 / trade-options-carmeet-gctf-facility-psn-server-dropdowns"
-BUILD_TAG = "XSI-TRADE-OPTIONS-CARMEET-GCTF-FACILITY-PSN-SERVER-DROPDOWNS"
+VERSION = "XSI full setup build 2026-07-04 / ai-smartness-trade-auto-v12"
+BUILD_TAG = "XSI-AI-SMARTNESS-TRADE-AUTO-V12"
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
@@ -68,6 +70,35 @@ DEFAULT_WALL_MESSAGE = "Another rule breaker has been added to the wall."
 DEFAULT_GUILT_TITLE = "⚖️ Board of Guilt"
 DEFAULT_GUILT_MESSAGE = "💀 {username} left the server...\n\nTheir name shall stay here forever."
 DEFAULT_GUILT_CONTENT = "bye I guess... {user}"
+
+# ---------------- AI SMARTNESS DEFAULTS ----------------
+# These are optional. The bot still runs without an OpenAI key; AI commands will
+# simply explain that OPENAI_API_KEY is missing.
+AI_API_KEY_NAME = "OPENAI_API_KEY"
+AI_MODEL_ENV_NAME = "OPENAI_MODEL"
+DEFAULT_AI_MODEL = os.getenv(AI_MODEL_ENV_NAME, "gpt-4.1-mini")
+DEFAULT_AI_PERSONALITY = (
+    "You are XSI AI, a helpful Discord assistant for an XSI GTA trading server. "
+    "Be friendly, direct, and safe. Help users pick the right ticket, explain rules, "
+    "summarise tickets for staff, and spot risky/scam-like behaviour. Do not help with "
+    "modded account sales, money services, account recoveries, scams, doxxing, or bypassing rules."
+)
+AI_REQUEST_TIMEOUT = int(os.getenv("XSI_AI_TIMEOUT", "25"))
+AI_MAX_OUTPUT_TOKENS = int(os.getenv("XSI_AI_MAX_OUTPUT_TOKENS", "650"))
+AI_COOLDOWN_SECONDS = int(os.getenv("XSI_AI_COOLDOWN_SECONDS", "20"))
+AI_TICKET_CONTEXT_LIMIT = int(os.getenv("XSI_AI_TICKET_CONTEXT_LIMIT", "18"))
+AI_CHAT_CONTEXT_LIMIT = int(os.getenv("XSI_AI_CHAT_CONTEXT_LIMIT", "10"))
+AI_MODERATION_MIN_SCORE = int(os.getenv("XSI_AI_MODERATION_MIN_SCORE", "80"))
+
+# ---------------- TRADE AUTO DEFAULTS ----------------
+# Image reminders and DMO reposts are normal bot automation, not AI.
+# They are enabled by default only for the IDs requested below, and admins
+# can change/toggle them later with /tradeauto.
+DEFAULT_TRADE_TICKET_LINK = "https://discord.com/channels/1421901802353201194/1472896391717195807"
+DEFAULT_TRADE_IMAGE_CATEGORY_IDS = [1504234792789479666, 1504233704514523136]
+DEFAULT_TRADE_DMO_TARGET_CHANNEL_ID = 1501943323760394300
+DEFAULT_TRADE_IMAGE_REMINDER_MESSAGE = f"Please Create a Ticket to Trade\n{DEFAULT_TRADE_TICKET_LINK}"
+DEFAULT_TRADE_DMO_TRIGGER = "DMO for Trade"
 
 MAX_WARNINGS = 3
 SPAM_LIMIT = 5
@@ -347,6 +378,7 @@ bot = XSIBot(command_prefix=["!", "?"], intents=intents)
 # Spam cache: guild:channel:user -> deque[(timestamp, normalized_content)]
 recent_messages: defaultdict[str, deque[tuple[float, str]]] = defaultdict(deque)
 smart_cooldowns: dict[str, float] = {}
+ai_cooldowns: dict[str, float] = {}
 
 
 # ============================================================
@@ -434,6 +466,24 @@ def default_guild_config() -> dict[str, Any]:
             "end": DEFAULT_AVAILABLE_END,
             "enabled": True,
         },
+        "ai": {
+            "enabled": False,
+            "model": DEFAULT_AI_MODEL,
+            "personality": DEFAULT_AI_PERSONALITY,
+            "reply_channel_ids": [],
+            "ticket_helper_enabled": True,
+            "moderation_watch_enabled": False,
+            "cooldown_seconds": AI_COOLDOWN_SECONDS,
+        },
+        "trade_auto": {
+            "image_reminder_enabled": True,
+            "image_category_ids": DEFAULT_TRADE_IMAGE_CATEGORY_IDS.copy(),
+            "image_reminder_message": DEFAULT_TRADE_IMAGE_REMINDER_MESSAGE,
+            "dmo_forward_enabled": True,
+            "dmo_trigger": DEFAULT_TRADE_DMO_TRIGGER,
+            "dmo_target_channel_id": DEFAULT_TRADE_DMO_TARGET_CHANNEL_ID,
+            "dmo_include_original_link": True,
+        },
         "temporary_unavailable": None,
         "last_availability_status": None,
         "created_category_ids": [],
@@ -478,6 +528,55 @@ def ensure_guild_config(guild_id: int) -> dict[str, Any]:
     if not isinstance(data.get("availability"), dict):
         data["availability"] = defaults["availability"]
         changed = True
+
+    ai_defaults = defaults.get("ai", {})
+    if not isinstance(data.get("ai"), dict):
+        data["ai"] = _copy_default(ai_defaults)
+        changed = True
+    else:
+        ai_data = data["ai"]
+        for ai_key, ai_value in ai_defaults.items():
+            if ai_key not in ai_data:
+                ai_data[ai_key] = _copy_default(ai_value)
+                changed = True
+        if not isinstance(ai_data.get("reply_channel_ids"), list):
+            ai_data["reply_channel_ids"] = []
+            changed = True
+        try:
+            ai_data["cooldown_seconds"] = max(5, int(ai_data.get("cooldown_seconds", AI_COOLDOWN_SECONDS)))
+        except (TypeError, ValueError):
+            ai_data["cooldown_seconds"] = AI_COOLDOWN_SECONDS
+            changed = True
+
+    trade_defaults = defaults.get("trade_auto", {})
+    if not isinstance(data.get("trade_auto"), dict):
+        data["trade_auto"] = _copy_default(trade_defaults)
+        changed = True
+    else:
+        trade_data = data["trade_auto"]
+        for trade_key, trade_value in trade_defaults.items():
+            if trade_key not in trade_data:
+                trade_data[trade_key] = _copy_default(trade_value)
+                changed = True
+        if not isinstance(trade_data.get("image_category_ids"), list):
+            trade_data["image_category_ids"] = DEFAULT_TRADE_IMAGE_CATEGORY_IDS.copy()
+            changed = True
+        trade_data["image_category_ids"] = [
+            _safe_int(category_id, 0)
+            for category_id in trade_data.get("image_category_ids", [])
+            if _safe_int(category_id, 0) > 0
+        ][:10]
+        trade_data["dmo_target_channel_id"] = _safe_int(
+            trade_data.get("dmo_target_channel_id"),
+            DEFAULT_TRADE_DMO_TARGET_CHANNEL_ID,
+        )
+        trade_data["image_reminder_enabled"] = bool(trade_data.get("image_reminder_enabled", True))
+        trade_data["dmo_forward_enabled"] = bool(trade_data.get("dmo_forward_enabled", True))
+        trade_data["dmo_include_original_link"] = bool(trade_data.get("dmo_include_original_link", True))
+        trade_data["dmo_trigger"] = str(trade_data.get("dmo_trigger") or DEFAULT_TRADE_DMO_TRIGGER).strip() or DEFAULT_TRADE_DMO_TRIGGER
+        trade_data["image_reminder_message"] = str(
+            trade_data.get("image_reminder_message") or DEFAULT_TRADE_IMAGE_REMINDER_MESSAGE
+        ).strip() or DEFAULT_TRADE_IMAGE_REMINDER_MESSAGE
 
     if changed:
         server_settings[gid] = data
@@ -2635,6 +2734,203 @@ def message_has_image_attachment(message: discord.Message) -> bool:
     return False
 
 
+# ===================== TRADE AUTO REMINDER / REPOST SYSTEM =====================
+def get_trade_auto_config(guild_id: int) -> dict[str, Any]:
+    config = guild_config(guild_id)
+    trade_data = config.get("trade_auto")
+    if not isinstance(trade_data, dict):
+        trade_data = _copy_default(default_guild_config()["trade_auto"])
+        config["trade_auto"] = trade_data
+    return trade_data
+
+
+def reset_trade_auto_config(guild_id: int) -> dict[str, Any]:
+    config = guild_config(guild_id)
+    config["trade_auto"] = _copy_default(default_guild_config()["trade_auto"])
+    return config["trade_auto"]
+
+
+def clean_trade_auto_ids(*values: Any) -> list[int]:
+    ids: list[int] = []
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple, set)):
+            nested = clean_trade_auto_ids(*value)
+            for nested_id in nested:
+                if nested_id not in ids:
+                    ids.append(nested_id)
+            continue
+        raw = str(value).strip()
+        if not raw:
+            continue
+        for part in re.split(r"[\s,|]+", raw):
+            clean_id = _safe_int(part, 0)
+            if clean_id > 0 and clean_id not in ids:
+                ids.append(clean_id)
+    return ids[:10]
+
+
+def trade_auto_channel_category_id(channel: discord.abc.GuildChannel | discord.abc.Messageable) -> int | None:
+    if isinstance(channel, discord.TextChannel):
+        return channel.category_id
+    if isinstance(channel, discord.Thread):
+        parent = channel.parent
+        if isinstance(parent, discord.TextChannel):
+            return parent.category_id
+    return None
+
+
+def trade_auto_channel_mention(channel: discord.abc.Messageable) -> str:
+    if isinstance(channel, (discord.TextChannel, discord.Thread)):
+        return channel.mention
+    return "Unknown channel"
+
+
+def trade_auto_matches_dmo_trigger(content: str, trigger: str) -> bool:
+    clean_content = normalize_text(content or "")
+    clean_trigger = normalize_text(trigger or DEFAULT_TRADE_DMO_TRIGGER)
+    if not clean_content or not clean_trigger:
+        return False
+    if clean_trigger in clean_content:
+        return True
+    # Also catch parenthesized forms like "(DMO for Trade)" even with extra spaces.
+    escaped = re.escape(clean_trigger).replace(r"\ ", r"\s+")
+    return bool(re.search(rf"\(\s*{escaped}\s*\)", clean_content, flags=re.IGNORECASE))
+
+
+def format_trade_auto_category_list(guild: discord.Guild, ids: list[Any]) -> str:
+    lines: list[str] = []
+    for category_id in clean_trade_auto_ids(ids):
+        category = guild.get_channel(category_id)
+        if isinstance(category, discord.CategoryChannel):
+            lines.append(f"`{category_id}` — {category.name}")
+        else:
+            lines.append(f"`{category_id}`")
+    return "\n".join(lines) or "None"
+
+
+def build_trade_auto_embed(guild: discord.Guild) -> discord.Embed:
+    data = get_trade_auto_config(guild.id)
+    target_channel_id = _safe_int(data.get("dmo_target_channel_id"), 0)
+    target_channel = guild.get_channel(target_channel_id) if target_channel_id else None
+    target_text = target_channel.mention if isinstance(target_channel, discord.TextChannel) else (f"`{target_channel_id}`" if target_channel_id else "None")
+    embed = discord.Embed(
+        title="🚗 XSI Trade Auto Settings",
+        description="Automatic ticket reminder for image posts and automatic DMO-for-trade reposts.",
+        color=discord.Color.green() if bool(data.get("image_reminder_enabled", True)) or bool(data.get("dmo_forward_enabled", True)) else discord.Color.orange(),
+    )
+    embed.add_field(
+        name="Image reminder",
+        value="✅ On" if bool(data.get("image_reminder_enabled", True)) else "❌ Off",
+        inline=True,
+    )
+    embed.add_field(
+        name="DMO repost",
+        value="✅ On" if bool(data.get("dmo_forward_enabled", True)) else "❌ Off",
+        inline=True,
+    )
+    embed.add_field(name="DMO target", value=target_text, inline=True)
+    embed.add_field(name="Image categories", value=format_trade_auto_category_list(guild, data.get("image_category_ids", []))[:1024], inline=False)
+    embed.add_field(name="Reminder message", value=truncate_discord_text(data.get("image_reminder_message"), 1024, DEFAULT_TRADE_IMAGE_REMINDER_MESSAGE), inline=False)
+    embed.add_field(name="DMO trigger", value=f"`{data.get('dmo_trigger') or DEFAULT_TRADE_DMO_TRIGGER}`", inline=True)
+    embed.add_field(
+        name="Slash commands",
+        value=(
+            "`/tradeauto status` • `/tradeauto image` • `/tradeauto dmo` • `/tradeauto reset`\n"
+            "Defaults are already set to your two category IDs and target channel ID."
+        ),
+        inline=False,
+    )
+    return embed
+
+
+async def maybe_send_trade_image_reminder(message: discord.Message, data: dict[str, Any]) -> bool:
+    if not bool(data.get("image_reminder_enabled", True)):
+        return False
+    if not isinstance(message.channel, (discord.TextChannel, discord.Thread)):
+        return False
+    if not message_has_image_attachment(message):
+        return False
+
+    category_id = trade_auto_channel_category_id(message.channel)
+    watched_categories = clean_trade_auto_ids(data.get("image_category_ids", []))
+    if category_id not in watched_categories:
+        return False
+
+    reminder = truncate_discord_text(
+        data.get("image_reminder_message"),
+        1900,
+        DEFAULT_TRADE_IMAGE_REMINDER_MESSAGE,
+    )
+    try:
+        await message.channel.send(reminder, allowed_mentions=discord.AllowedMentions.none())
+        return True
+    except discord.HTTPException as exc:
+        log.warning("Trade image reminder failed: %s", exc)
+        return False
+
+
+async def maybe_forward_dmo_trade_message(message: discord.Message, data: dict[str, Any]) -> bool:
+    if message.guild is None:
+        return False
+    if not bool(data.get("dmo_forward_enabled", True)):
+        return False
+    trigger = str(data.get("dmo_trigger") or DEFAULT_TRADE_DMO_TRIGGER)
+    if not trade_auto_matches_dmo_trigger(message.content or "", trigger):
+        return False
+
+    target_channel_id = _safe_int(data.get("dmo_target_channel_id"), DEFAULT_TRADE_DMO_TARGET_CHANNEL_ID)
+    if not target_channel_id or getattr(message.channel, "id", None) == target_channel_id:
+        return False
+
+    target_channel = await get_text_channel(message.guild, target_channel_id)
+    if target_channel is None:
+        await send_staff_log(
+            message.guild,
+            f"⚠️ Trade auto DMO target channel `{target_channel_id}` was not found. Use `/tradeauto dmo` to set it again.",
+        )
+        return False
+
+    attachment_lines: list[str] = []
+    for attachment in message.attachments[:5]:
+        filename = truncate_discord_text(getattr(attachment, "filename", "attachment"), 80, "attachment")
+        url = truncate_discord_text(getattr(attachment, "url", ""), 240, "")
+        if url:
+            attachment_lines.append(f"- {filename}: {url}")
+
+    author_text = f"{message.author} (`{message.author.id}`)"
+    original_text = message.jump_url if bool(data.get("dmo_include_original_link", True)) else "Link disabled"
+    lines = [
+        "📢 **DMO for Trade detected**",
+        f"From: {author_text}",
+        f"Channel: {trade_auto_channel_mention(message.channel)}",
+        f"Original: {original_text}",
+        "",
+        "**Message:**",
+        truncate_discord_text(message.content, 1100, "[no text content]"),
+    ]
+    if attachment_lines:
+        lines.extend(["", "**Attachments:**", *attachment_lines])
+
+    outbound = truncate_discord_text("\n".join(lines), 1900, "📢 DMO for Trade detected.")
+    try:
+        await target_channel.send(outbound, allowed_mentions=discord.AllowedMentions.none())
+        return True
+    except discord.HTTPException as exc:
+        log.warning("Trade auto DMO forward failed: %s", exc)
+        return False
+
+
+async def maybe_handle_trade_auto(message: discord.Message) -> bool:
+    if message.guild is None or message.author.bot:
+        return False
+    data = get_trade_auto_config(message.guild.id)
+    image_sent = await maybe_send_trade_image_reminder(message, data)
+    dmo_sent = await maybe_forward_dmo_trade_message(message, data)
+    return image_sent or dmo_sent
+
+
 def extract_server_link(text: str) -> str | None:
     """Return a Discord invite link only.
 
@@ -3738,6 +4034,394 @@ async def maybe_handle_smart_message(message: discord.Message) -> bool:
 
 
 # ============================================================
+# AI SMARTNESS HELPERS
+# ============================================================
+AI_TRIGGER_PREFIXES = ("xsi ", "xsi,", "xsi:", "sally ", "sally,", "sally:", "ai ", "ai,")
+AI_MODERATION_HINTS = (
+    "cheap", "sell", "selling", "buy", "account", "acc", "modded", "money", "cash", "boost",
+    "recovery", "unlock", "service", "paypal", "cashapp", "bank", "middleman", "dm me", "proof",
+    "discord.gg", "discord.com/invite", "invite", "scam", "trade outside", "gift card",
+)
+
+
+def get_ai_config(guild_id: int) -> dict[str, Any]:
+    config = guild_config(guild_id)
+    ai_defaults = default_guild_config()["ai"]
+    ai_data = config.get("ai")
+    if not isinstance(ai_data, dict):
+        ai_data = _copy_default(ai_defaults)
+        config["ai"] = ai_data
+    for key, value in ai_defaults.items():
+        if key not in ai_data:
+            ai_data[key] = _copy_default(value)
+    if not isinstance(ai_data.get("reply_channel_ids"), list):
+        ai_data["reply_channel_ids"] = []
+    try:
+        ai_data["cooldown_seconds"] = max(5, int(ai_data.get("cooldown_seconds", AI_COOLDOWN_SECONDS)))
+    except (TypeError, ValueError):
+        ai_data["cooldown_seconds"] = AI_COOLDOWN_SECONDS
+    return ai_data
+
+
+def openai_api_key() -> str:
+    return os.getenv(AI_API_KEY_NAME, "").strip()
+
+
+def ai_is_ready(guild_id: int) -> tuple[bool, str]:
+    ai_data = get_ai_config(guild_id)
+    if not bool(ai_data.get("enabled", False)):
+        return False, "AI is disabled for this server. An admin can run `!aisetup on` or `/aisetup enabled:true`."
+    if not openai_api_key():
+        return False, f"AI is enabled, but `{AI_API_KEY_NAME}` is missing in Railway variables. Add it, redeploy, then try again."
+    return True, ""
+
+
+def sanitize_ai_text(text: Any, limit: int = 1800) -> str:
+    value = str(text if text is not None else "").strip()
+    value = value.replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
+    value = re.sub(r"<@&\d+>", "@role", value)
+    value = re.sub(r"<@!?\d+>", "@user", value)
+    value = re.sub(r"\n{4,}", "\n\n\n", value)
+    return truncate_discord_text(value, limit, "AI did not return text.")
+
+
+def strip_bot_trigger(message: discord.Message) -> tuple[bool, str]:
+    content = str(message.content or "").strip()
+    lowered = content.lower()
+    mentioned = False
+    if bot.user is not None and bot.user in message.mentions:
+        mentioned = True
+        content = re.sub(rf"<@!?{bot.user.id}>", "", content).strip()
+        lowered = content.lower()
+    for prefix in AI_TRIGGER_PREFIXES:
+        if lowered.startswith(prefix):
+            return True, content[len(prefix):].strip()
+    return mentioned, content.strip()
+
+
+def ai_channel_can_auto_reply(guild_id: int, channel_id: int) -> bool:
+    ai_data = get_ai_config(guild_id)
+    reply_ids = {_safe_int(channel_id_value, 0) for channel_id_value in ai_data.get("reply_channel_ids", [])}
+    if channel_id in reply_ids:
+        return True
+    if bool(ai_data.get("ticket_helper_enabled", True)) and str(channel_id) in ticket_owners:
+        return True
+    return False
+
+
+def check_ai_cooldown(guild_id: int, user_id: int, scope: str, cooldown_seconds: int) -> tuple[bool, int]:
+    now = time.time()
+    key = f"{guild_id}:{user_id}:{scope}"
+    last = ai_cooldowns.get(key, 0)
+    remaining = int(cooldown_seconds - (now - last))
+    if remaining > 0:
+        return False, remaining
+    ai_cooldowns[key] = now
+    return True, 0
+
+
+def extract_openai_output_text(data: dict[str, Any]) -> str:
+    direct = data.get("output_text")
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+
+    parts: list[str] = []
+    for item in data.get("output", []) or []:
+        if not isinstance(item, dict):
+            continue
+        content_items = item.get("content", []) or []
+        for content in content_items:
+            if not isinstance(content, dict):
+                continue
+            text_value = content.get("text")
+            if isinstance(text_value, str):
+                parts.append(text_value)
+            elif isinstance(text_value, dict):
+                nested = text_value.get("value")
+                if isinstance(nested, str):
+                    parts.append(nested)
+    return "\n".join(part.strip() for part in parts if part and part.strip()).strip()
+
+
+def _openai_responses_request(payload: dict[str, Any]) -> dict[str, Any]:
+    api_key = openai_api_key()
+    if not api_key:
+        raise RuntimeError(f"{AI_API_KEY_NAME} is not configured.")
+
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/responses",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=AI_REQUEST_TIMEOUT) as response:
+            body = response.read().decode("utf-8")
+            return json.loads(body)
+    except urllib.error.HTTPError as exc:
+        error_body = ""
+        try:
+            error_body = exc.read().decode("utf-8")[:800]
+        except Exception:
+            pass
+        raise RuntimeError(f"OpenAI API error {exc.code}: {error_body or exc.reason}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"OpenAI connection error: {exc.reason}") from exc
+
+
+async def ai_generate_text(
+    guild: discord.Guild,
+    prompt: str,
+    *,
+    purpose: str = "chat",
+    member: discord.Member | discord.User | None = None,
+    max_tokens: int = AI_MAX_OUTPUT_TOKENS,
+    temperature: float = 0.25,
+) -> str:
+    ai_data = get_ai_config(guild.id)
+    model = str(ai_data.get("model") or DEFAULT_AI_MODEL).strip() or DEFAULT_AI_MODEL
+    personality = str(ai_data.get("personality") or DEFAULT_AI_PERSONALITY).strip() or DEFAULT_AI_PERSONALITY
+
+    instructions = (
+        f"{personality}\n\n"
+        f"Server: {guild.name}\n"
+        f"Purpose: {purpose}\n"
+        "Important rules:\n"
+        "- Keep Discord replies concise, practical, and readable.\n"
+        "- Do not ping @everyone, @here, or roles.\n"
+        "- Never reveal private staff-only reasoning or secrets.\n"
+        "- For trade/ticket help, ask for platform, PSN, item/car, proof, and clear next steps.\n"
+        "- Do not help with modded account sales, money services, account recovery, scams, harassment, or doxxing.\n"
+        "- If unsure, say what info is missing and suggest opening/using the correct ticket."
+    )
+    if member is not None:
+        instructions += f"\nCurrent user: {getattr(member, 'display_name', member.name)} / ID {member.id}"
+
+    payload = {
+        "model": model,
+        "instructions": instructions,
+        "input": prompt,
+        "max_output_tokens": max(80, min(int(max_tokens), 1200)),
+        "temperature": float(temperature),
+    }
+    data = await asyncio.to_thread(_openai_responses_request, payload)
+    output = extract_openai_output_text(data)
+    return sanitize_ai_text(output, 1900)
+
+
+async def collect_channel_context(channel: discord.TextChannel, limit: int = AI_CHAT_CONTEXT_LIMIT) -> str:
+    lines: list[str] = []
+    try:
+        async for old_message in channel.history(limit=max(1, min(limit, 30))):
+            author_name = getattr(old_message.author, "display_name", str(old_message.author))
+            content = str(old_message.content or "").strip()
+            if old_message.attachments:
+                attachment_names = ", ".join(attachment.filename for attachment in old_message.attachments[:4])
+                content = f"{content}\n[attachments: {attachment_names}]".strip()
+            if not content:
+                continue
+            lines.append(f"{author_name}: {content[:500]}")
+    except discord.HTTPException:
+        return ""
+    return "\n".join(reversed(lines))[-5000:]
+
+
+async def build_ai_ticket_prompt(channel: discord.TextChannel, actor: discord.Member | discord.User, mode: str) -> str:
+    data = ticket_owners.get(str(channel.id))
+    ticket_details = "This is not a tracked XSI ticket channel."
+    if isinstance(data, dict):
+        ticket_details = (
+            f"Ticket type: {data.get('ticket_type') or 'Ticket'}\n"
+            f"Ticket reason/prompt: {data.get('ticket_reason') or 'None'}\n"
+            f"Owner ID: {data.get('owner_id') or 'Unknown'}\n"
+            f"Claimed by: {data.get('claimed_by') or 'Not claimed'}"
+        )
+
+    context = await collect_channel_context(channel, AI_TICKET_CONTEXT_LIMIT)
+    if mode in {"reply", "draft", "response"}:
+        instruction = (
+            "Write a helpful staff reply draft for this ticket. Keep it professional and short. "
+            "Ask for missing info if needed. Do not claim staff has verified proof unless the context clearly says so."
+        )
+    elif mode in {"checklist", "next", "nextsteps", "next_steps"}:
+        instruction = (
+            "Create a clear staff checklist: what is known, what is missing, risk flags, and the next 3 actions."
+        )
+    else:
+        instruction = (
+            "Summarize this ticket for staff: user request, trade details, proof status, PSN/facility info, risk flags, and next action."
+        )
+
+    return (
+        f"{instruction}\n\n"
+        f"Staff requester: {actor}\n"
+        f"Ticket details:\n{ticket_details}\n\n"
+        f"Recent ticket messages:\n{context or 'No recent messages available.'}"
+    )
+
+
+async def generate_ticket_ai(channel: discord.TextChannel, actor: discord.Member | discord.User, mode: str) -> str:
+    prompt = await build_ai_ticket_prompt(channel, actor, mode.lower().strip() or "summary")
+    return await ai_generate_text(channel.guild, prompt, purpose=f"ticket-{mode}", member=actor, max_tokens=850)
+
+
+async def maybe_handle_ai_reply(message: discord.Message) -> bool:
+    if message.guild is None or not isinstance(message.channel, discord.TextChannel):
+        return False
+    if message.author.bot or message.content.startswith(("!", "?", "/")):
+        return False
+
+    triggered, prompt_text = strip_bot_trigger(message)
+    if not triggered:
+        return False
+
+    ready, reason = ai_is_ready(message.guild.id)
+    if not ready:
+        # Avoid noisy public errors unless the user directly mentioned the bot.
+        if bot.user is not None and bot.user in message.mentions:
+            await message.reply(reason, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+        return True
+
+    if not ai_channel_can_auto_reply(message.guild.id, message.channel.id) and bot.user not in message.mentions:
+        return False
+
+    ai_data = get_ai_config(message.guild.id)
+    cooldown_seconds = int(ai_data.get("cooldown_seconds", AI_COOLDOWN_SECONDS))
+    allowed, remaining = check_ai_cooldown(message.guild.id, message.author.id, "auto-reply", cooldown_seconds)
+    if not allowed:
+        await message.reply(f"⏳ AI cooldown: try again in {remaining}s.", mention_author=False)
+        return True
+
+    context = await collect_channel_context(message.channel, AI_CHAT_CONTEXT_LIMIT)
+    prompt = (
+        "Answer the user's Discord message using the recent channel context. "
+        "Be useful, brief, and safe.\n\n"
+        f"User message: {prompt_text or message.content}\n\n"
+        f"Recent context:\n{context or 'No recent context.'}"
+    )
+    try:
+        async with message.channel.typing():
+            answer = await ai_generate_text(message.guild, prompt, purpose="discord auto reply", member=message.author)
+    except Exception as exc:
+        log.warning("AI auto reply failed: %s", exc)
+        await message.reply("❌ AI could not answer right now. Check Railway logs/API key.", mention_author=False)
+        return True
+
+    await message.reply(answer, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+    return True
+
+
+async def maybe_ai_moderation_watch(message: discord.Message) -> bool:
+    if message.guild is None or not isinstance(message.channel, discord.TextChannel):
+        return False
+    if message.author.bot or not isinstance(message.author, discord.Member):
+        return False
+    if is_staff_or_mod(message.author):
+        return False
+
+    ai_data = get_ai_config(message.guild.id)
+    if not bool(ai_data.get("enabled", False)) or not bool(ai_data.get("moderation_watch_enabled", False)):
+        return False
+    if not openai_api_key():
+        return False
+
+    content = normalize_text(message.content or "")
+    if len(content) < 8:
+        return False
+    if not any(hint in content for hint in AI_MODERATION_HINTS):
+        return False
+
+    allowed, _ = check_ai_cooldown(message.guild.id, message.author.id, "mod-watch", 90)
+    if not allowed:
+        return False
+
+    prompt = (
+        "Classify this Discord message for scam/rule risk in a GTA trading server. "
+        "Return only compact JSON with keys: risk (0-100), category, reason, recommended_action. "
+        "Do not punish users; this is for staff review.\n\n"
+        f"Message: {message.content[:1500]}"
+    )
+    try:
+        result = await ai_generate_text(message.guild, prompt, purpose="moderation risk scoring", member=message.author, max_tokens=220, temperature=0.1)
+    except Exception as exc:
+        log.warning("AI moderation watch failed: %s", exc)
+        return False
+
+    risk = 0
+    try:
+        parsed = json.loads(result.strip().strip("`"))
+        risk = _safe_int(parsed.get("risk"), 0)
+        category = str(parsed.get("category") or "AI risk")
+        reason = str(parsed.get("reason") or "No reason returned")
+        recommended = str(parsed.get("recommended_action") or "review")
+    except Exception:
+        match = re.search(r"risk[^0-9]*(\d{1,3})", result, flags=re.IGNORECASE)
+        risk = min(100, _safe_int(match.group(1), 0)) if match else 0
+        category = "AI risk"
+        reason = result[:500]
+        recommended = "review"
+
+    if risk < AI_MODERATION_MIN_SCORE:
+        return False
+
+    await send_staff_log(
+        message.guild,
+        (
+            f"🧠 **AI moderation watch** scored a message as risk `{risk}/100`.\n"
+            f"User: {message.author.mention} (`{message.author.id}`)\n"
+            f"Channel: {message.channel.mention}\n"
+            f"Category: `{truncate_discord_text(category, 80, 'AI risk')}`\n"
+            f"Recommended: `{truncate_discord_text(recommended, 80, 'review')}`\n"
+            f"Reason: {truncate_discord_text(reason, 500, 'No reason')}\n"
+            f"Message: {truncate_discord_text(message.content, 900, '[no text]')}\n"
+            "No automatic punishment was taken. Staff should review manually."
+        ),
+    )
+    return True
+
+
+def build_ai_settings_embed(guild: discord.Guild) -> discord.Embed:
+    ai_data = get_ai_config(guild.id)
+    reply_channels = []
+    for channel_id in ai_data.get("reply_channel_ids", []):
+        channel = guild.get_channel(_safe_int(channel_id, 0))
+        reply_channels.append(channel.mention if isinstance(channel, discord.TextChannel) else f"`{channel_id}`")
+    embed = discord.Embed(
+        title="🧠 XSI AI Settings",
+        description="Optional AI smartness layer for chat help, ticket summaries, and staff risk alerts.",
+        color=discord.Color.green() if bool(ai_data.get("enabled", False)) else discord.Color.orange(),
+    )
+    embed.add_field(name="Enabled", value="✅ Yes" if bool(ai_data.get("enabled", False)) else "❌ No", inline=True)
+    embed.add_field(name="API key", value="✅ Found" if openai_api_key() else f"❌ Missing `{AI_API_KEY_NAME}`", inline=True)
+    embed.add_field(name="Model", value=f"`{ai_data.get('model') or DEFAULT_AI_MODEL}`", inline=True)
+    embed.add_field(name="Auto-reply channels", value=", ".join(reply_channels) or "None", inline=False)
+    embed.add_field(name="Ticket helper", value="✅ On" if bool(ai_data.get("ticket_helper_enabled", True)) else "❌ Off", inline=True)
+    embed.add_field(name="Moderation watch", value="✅ On" if bool(ai_data.get("moderation_watch_enabled", False)) else "❌ Off", inline=True)
+    embed.add_field(name="Cooldown", value=f"{ai_data.get('cooldown_seconds', AI_COOLDOWN_SECONDS)}s", inline=True)
+    embed.add_field(
+        name="Commands",
+        value=(
+            "`!aisetup on/off` • `!aichannel on/off` • `!aiask question` • `!aiticket summary|reply|checklist`\n"
+            "Slash: `/aisetup`, `/aichannel`, `/aiask`, `/aiticket`, `/aimodwatch`, `/aisettings`"
+        ),
+        inline=False,
+    )
+    return embed
+
+
+async def send_ai_long(target: discord.abc.Messageable, text: str, *, prefix: str = "") -> None:
+    clean = sanitize_ai_text(text, 3900)
+    chunks = split_record_text(clean, limit=1850)
+    for index, chunk in enumerate(chunks, start=1):
+        heading = prefix if index == 1 else ""
+        await target.send(f"{heading}{chunk}", allowed_mentions=discord.AllowedMentions.none())
+
+
+# ============================================================
 # GIVEAWAYS
 # ============================================================
 DURATION_PATTERN = re.compile(
@@ -4550,10 +5234,12 @@ async def on_message(message: discord.Message) -> None:
     await maybe_dm_ticket_owner(message)
     await maybe_send_unavailable_ticket_reply(message)
     await maybe_handle_smart_message(message)
+    await maybe_handle_trade_auto(message)
 
     member = message.author
 
     if is_staff_or_mod(member):
+        await maybe_handle_ai_reply(message)
         await bot.process_commands(message)
         return
 
@@ -4561,6 +5247,10 @@ async def on_message(message: discord.Message) -> None:
     offence = detect_offence(content)
     if offence is None and is_spam(message.guild.id, message.channel.id, member.id, content):
         offence = "Spam / repeated messages"
+
+    if offence is None:
+        await maybe_ai_moderation_watch(message)
+        await maybe_handle_ai_reply(message)
 
     if offence is not None:
         warning_count = await add_warning(message.guild.id, member.id)
@@ -4606,7 +5296,8 @@ async def buildcheck_cmd(ctx: commands.Context) -> None:
     critical = [
         "clearsetup", "setunavailable", "refreshticketpanel", "changeticketui",
         "customwelcome", "customticketmessage", "customticketopenmessage", "customguilt",
-        "setavailability", "availability", "clearunavailable", "record", "setrecordcategory", "setrecordchannel", "ticket", "ticketuicustomation", "customiseticketui"
+        "setavailability", "availability", "clearunavailable", "record", "setrecordcategory", "setrecordchannel", "ticket", "ticketuicustomation", "customiseticketui",
+        "aisetup", "aiask", "aiticket", "aichannel", "aimodwatch"
     ]
     missing = [name for name in critical if name not in names]
     missing_text = ", ".join(missing) if missing else "None"
@@ -5487,6 +6178,239 @@ async def clearsmartmessages(ctx: commands.Context) -> None:
 
 
 # ============================================================
+# PREFIX COMMANDS - TRADE AUTO
+# ============================================================
+@bot.command(name="tradeauto", aliases=["autotrade", "tradeautomation"])
+@commands.has_permissions(administrator=True)
+async def tradeauto_prefix(ctx: commands.Context, mode: str = "status", *, value: str = "") -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+
+    data = get_trade_auto_config(ctx.guild.id)
+    mode_clean = mode.lower().strip()
+    value_clean = value.lower().strip()
+
+    if mode_clean in {"status", "check", "settings"}:
+        await ctx.send(embed=build_trade_auto_embed(ctx.guild))
+        return
+
+    if mode_clean in {"reset", "defaults", "default"}:
+        reset_trade_auto_config(ctx.guild.id)
+        await save_server_settings()
+        await ctx.send("✅ Trade auto settings reset to your default category/channel IDs.", embed=build_trade_auto_embed(ctx.guild))
+        return
+
+    if mode_clean in {"on", "enable", "enabled", "true", "yes"}:
+        data["image_reminder_enabled"] = True
+        data["dmo_forward_enabled"] = True
+        await save_server_settings()
+        await ctx.send("✅ Trade auto image reminders and DMO reposts are now on.")
+        return
+
+    if mode_clean in {"off", "disable", "disabled", "false", "no"}:
+        data["image_reminder_enabled"] = False
+        data["dmo_forward_enabled"] = False
+        await save_server_settings()
+        await ctx.send("✅ Trade auto image reminders and DMO reposts are now off.")
+        return
+
+    if mode_clean in {"image", "images", "reminder"}:
+        if value_clean in {"off", "disable", "disabled", "false", "no"}:
+            data["image_reminder_enabled"] = False
+            await save_server_settings()
+            await ctx.send("✅ Trade image reminder disabled.")
+            return
+        if value_clean in {"on", "enable", "enabled", "true", "yes", ""}:
+            data["image_reminder_enabled"] = True
+            await save_server_settings()
+            await ctx.send("✅ Trade image reminder enabled.")
+            return
+
+    if mode_clean in {"dmo", "dmofortrade", "forward", "repost"}:
+        if value_clean in {"off", "disable", "disabled", "false", "no"}:
+            data["dmo_forward_enabled"] = False
+            await save_server_settings()
+            await ctx.send("✅ DMO-for-trade repost disabled.")
+            return
+        if value_clean in {"on", "enable", "enabled", "true", "yes", ""}:
+            data["dmo_forward_enabled"] = True
+            await save_server_settings()
+            await ctx.send("✅ DMO-for-trade repost enabled.")
+            return
+
+    await ctx.send(
+        "❌ Use `!tradeauto status`, `!tradeauto on`, `!tradeauto off`, `!tradeauto image on/off`, `!tradeauto dmo on/off`, or `!tradeauto reset`.\n"
+        "For channel/category setup, use slash commands: `/tradeauto image` and `/tradeauto dmo`."
+    )
+
+
+# ============================================================
+# PREFIX COMMANDS - AI SMARTNESS
+# ============================================================
+@bot.command(name="aisetup", aliases=["aienable", "aiconfig"])
+@commands.has_permissions(administrator=True)
+async def aisetup_prefix(ctx: commands.Context, mode: str = "status", *, personality: str = "") -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    ai_data = get_ai_config(ctx.guild.id)
+    mode_clean = mode.lower().strip()
+    if mode_clean in {"on", "enable", "enabled", "true", "yes"}:
+        ai_data["enabled"] = True
+        if personality.strip():
+            ai_data["personality"] = personality.strip()
+        await save_server_settings()
+        key_note = "" if openai_api_key() else f"\n⚠️ Add `{AI_API_KEY_NAME}` in Railway variables before AI can answer."
+        await ctx.send(f"✅ XSI AI enabled.{key_note}", allowed_mentions=discord.AllowedMentions.none())
+        return
+    if mode_clean in {"off", "disable", "disabled", "false", "no"}:
+        ai_data["enabled"] = False
+        await save_server_settings()
+        await ctx.send("✅ XSI AI disabled.")
+        return
+    await ctx.send(embed=build_ai_settings_embed(ctx.guild))
+
+
+@bot.command(name="aisettings", aliases=["aistatus"])
+@commands.has_permissions(administrator=True)
+async def aisettings_prefix(ctx: commands.Context) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    await ctx.send(embed=build_ai_settings_embed(ctx.guild))
+
+
+@bot.command(name="aichannel", aliases=["aichat"])
+@commands.has_permissions(administrator=True)
+async def aichannel_prefix(ctx: commands.Context, mode: str = "on") -> None:
+    if ctx.guild is None or not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("❌ This command only works inside a server text channel.")
+        return
+    ai_data = get_ai_config(ctx.guild.id)
+    ids = ai_data.setdefault("reply_channel_ids", [])
+    channel_id = ctx.channel.id
+    mode_clean = mode.lower().strip()
+    if mode_clean in {"off", "disable", "disabled", "remove", "no"}:
+        ai_data["reply_channel_ids"] = [old for old in ids if _safe_int(old, 0) != channel_id]
+        await save_server_settings()
+        await ctx.send(f"✅ AI auto-replies disabled in {ctx.channel.mention}.")
+        return
+    if channel_id not in [_safe_int(old, 0) for old in ids]:
+        ids.append(channel_id)
+    ai_data["enabled"] = True
+    await save_server_settings()
+    key_note = "" if openai_api_key() else f"\n⚠️ Add `{AI_API_KEY_NAME}` in Railway variables before AI can answer."
+    await ctx.send(f"✅ AI auto-replies enabled in {ctx.channel.mention}. Users can mention the bot or start with `xsi`.{key_note}")
+
+
+@bot.command(name="aipersonality", aliases=["aiprompt"])
+@commands.has_permissions(administrator=True)
+async def aipersonality_prefix(ctx: commands.Context, *, personality: str) -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    ai_data = get_ai_config(ctx.guild.id)
+    ai_data["personality"] = truncate_discord_text(personality, 1800, DEFAULT_AI_PERSONALITY)
+    await save_server_settings()
+    await ctx.send("✅ AI personality/system instructions updated.", allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.command(name="aimodel")
+@commands.has_permissions(administrator=True)
+async def aimodel_prefix(ctx: commands.Context, *, model: str = "") -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    ai_data = get_ai_config(ctx.guild.id)
+    clean_model = model.strip()
+    if not clean_model:
+        await ctx.send(f"Current AI model: `{ai_data.get('model') or DEFAULT_AI_MODEL}`")
+        return
+    ai_data["model"] = clean_model[:100]
+    await save_server_settings()
+    await ctx.send(f"✅ AI model set to `{ai_data['model']}`.")
+
+
+@bot.command(name="aimodwatch", aliases=["aimod"])
+@commands.has_permissions(administrator=True)
+async def aimodwatch_prefix(ctx: commands.Context, mode: str = "status") -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    ai_data = get_ai_config(ctx.guild.id)
+    mode_clean = mode.lower().strip()
+    if mode_clean in {"on", "enable", "enabled", "true", "yes"}:
+        ai_data["enabled"] = True
+        ai_data["moderation_watch_enabled"] = True
+        await save_server_settings()
+        await ctx.send("✅ AI moderation watch enabled. It only alerts staff logs; it does not punish automatically.")
+        return
+    if mode_clean in {"off", "disable", "disabled", "false", "no"}:
+        ai_data["moderation_watch_enabled"] = False
+        await save_server_settings()
+        await ctx.send("✅ AI moderation watch disabled.")
+        return
+    await ctx.send("AI moderation watch is " + ("✅ on" if bool(ai_data.get("moderation_watch_enabled", False)) else "❌ off"))
+
+
+@bot.command(name="aiask", aliases=["askai", "xsiask"])
+async def aiask_prefix(ctx: commands.Context, *, question: str) -> None:
+    if ctx.guild is None or not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("❌ This command only works inside a server text channel.")
+        return
+    ready, reason = ai_is_ready(ctx.guild.id)
+    if not ready:
+        await ctx.send(reason, allowed_mentions=discord.AllowedMentions.none())
+        return
+    ai_data = get_ai_config(ctx.guild.id)
+    allowed, remaining = check_ai_cooldown(ctx.guild.id, ctx.author.id, "aiask", int(ai_data.get("cooldown_seconds", AI_COOLDOWN_SECONDS)))
+    if not allowed:
+        await ctx.send(f"⏳ AI cooldown: try again in {remaining}s.")
+        return
+    context = await collect_channel_context(ctx.channel, AI_CHAT_CONTEXT_LIMIT)
+    prompt = f"Answer this server member's question.\nQuestion: {question}\n\nRecent channel context:\n{context or 'No context.'}"
+    try:
+        async with ctx.typing():
+            answer = await ai_generate_text(ctx.guild, prompt, purpose="aiask command", member=ctx.author)
+    except Exception as exc:
+        log.exception("AI ask failed: %s", exc)
+        await ctx.send("❌ AI request failed. Check Railway logs, API key, and model name.")
+        return
+    await send_ai_long(ctx.channel, answer, prefix="🧠 **XSI AI:**\n")
+
+
+@bot.command(name="aiticket", aliases=["ticketsummary", "aisummary", "aireply"])
+@commands.has_permissions(manage_messages=True)
+async def aiticket_prefix(ctx: commands.Context, mode: str = "summary") -> None:
+    if ctx.guild is None or not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("❌ This command only works inside a server text channel.")
+        return
+    ready, reason = ai_is_ready(ctx.guild.id)
+    if not ready:
+        await ctx.send(reason, allowed_mentions=discord.AllowedMentions.none())
+        return
+    try:
+        async with ctx.typing():
+            answer = await generate_ticket_ai(ctx.channel, ctx.author, mode)
+    except Exception as exc:
+        log.exception("AI ticket helper failed: %s", exc)
+        await ctx.send("❌ AI ticket helper failed. Check Railway logs, API key, and model name.")
+        return
+
+    dm_sent = False
+    try:
+        await send_ai_long(ctx.author, answer, prefix=f"🧠 **XSI AI ticket {mode}:**\n")
+        dm_sent = True
+    except discord.HTTPException:
+        dm_sent = False
+    if dm_sent:
+        await ctx.send(f"✅ AI ticket {mode} sent to your DMs.", allowed_mentions=discord.AllowedMentions.none())
+    else:
+        await send_ai_long(ctx.channel, answer, prefix=f"🧠 **XSI AI ticket {mode}:**\n")
+
+
+# ============================================================
 # PREFIX COMMANDS - UTILITY / GIVEAWAYS
 # ============================================================
 @bot.command(name="sallyspeak")
@@ -5672,7 +6596,8 @@ async def slash_buildcheck(interaction: discord.Interaction) -> None:
     critical = [
         "clearsetup", "setunavailable", "refreshticketpanel", "changeticketui",
         "customwelcome", "customticketmessage", "customticketopenmessage", "customguilt",
-        "setavailability", "availability", "clearunavailable", "record", "setrecordcategory", "setrecordchannel", "ticket", "ticketuicustomation", "customiseticketui"
+        "setavailability", "availability", "clearunavailable", "record", "setrecordcategory", "setrecordchannel", "ticket", "ticketuicustomation", "customiseticketui",
+        "aisetup", "aiask", "aiticket", "aichannel", "aimodwatch"
     ]
     missing = [name for name in critical if name not in names]
     missing_text = ", ".join(missing) if missing else "None"
@@ -6438,6 +7363,124 @@ async def slash_ticket_group_remove(interaction: discord.Interaction, slot: int)
 bot.tree.add_command(ticket_group)
 
 
+# ---------------- TRADE AUTO SETUP GROUP ----------------
+tradeauto_group = app_commands.Group(name="tradeauto", description="Configure XSI trade auto-reminders and reposts")
+
+
+@tradeauto_group.command(name="status", description="Show trade auto settings")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_tradeauto_status(interaction: discord.Interaction) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    await interaction.response.send_message(embed=build_trade_auto_embed(interaction.guild), ephemeral=True)
+
+
+@tradeauto_group.command(name="image", description="Configure image-post ticket reminders for trade categories")
+@app_commands.describe(
+    enabled="Turn the image reminder on or off",
+    category_1="First category ID to watch for images",
+    category_2="Second category ID to watch for images",
+    extra_categories="Optional extra category IDs separated by spaces or commas",
+    message="Optional reminder message. Leave blank to keep current message.",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_tradeauto_image(
+    interaction: discord.Interaction,
+    enabled: bool,
+    category_1: str = "",
+    category_2: str = "",
+    extra_categories: str = "",
+    message: str | None = None,
+) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    data = get_trade_auto_config(interaction.guild.id)
+    data["image_reminder_enabled"] = bool(enabled)
+    category_ids = clean_trade_auto_ids(category_1, category_2, extra_categories)
+    if category_ids:
+        data["image_category_ids"] = category_ids
+    if message is not None and message.strip():
+        data["image_reminder_message"] = truncate_discord_text(message.strip(), 1800, DEFAULT_TRADE_IMAGE_REMINDER_MESSAGE)
+    await save_server_settings()
+    await interaction.response.send_message(
+        "✅ Trade image reminder updated. Any image posted in the watched category/categories will get the ticket reminder.",
+        embed=build_trade_auto_embed(interaction.guild),
+        ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@tradeauto_group.command(name="dmo", description="Configure DMO-for-trade reposts")
+@app_commands.describe(
+    enabled="Turn DMO reposts on or off",
+    target_channel="Channel where DMO-for-trade posts should be copied",
+    trigger="Trigger phrase to watch for. Default: DMO for Trade",
+    include_original_link="Include the original message jump link in the repost",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_tradeauto_dmo(
+    interaction: discord.Interaction,
+    enabled: bool,
+    target_channel: discord.TextChannel | None = None,
+    trigger: str = DEFAULT_TRADE_DMO_TRIGGER,
+    include_original_link: bool = True,
+) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    data = get_trade_auto_config(interaction.guild.id)
+    data["dmo_forward_enabled"] = bool(enabled)
+    if target_channel is not None:
+        data["dmo_target_channel_id"] = target_channel.id
+    data["dmo_trigger"] = truncate_discord_text(trigger.strip() or DEFAULT_TRADE_DMO_TRIGGER, 80, DEFAULT_TRADE_DMO_TRIGGER)
+    data["dmo_include_original_link"] = bool(include_original_link)
+    await save_server_settings()
+    await interaction.response.send_message(
+        "✅ DMO-for-trade repost settings updated. Messages containing the trigger, including `(DMO for Trade)`, will be copied to the target channel.",
+        embed=build_trade_auto_embed(interaction.guild),
+        ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@tradeauto_group.command(name="toggle", description="Turn all trade auto features on or off")
+@app_commands.describe(enabled="Turn both image reminders and DMO reposts on/off")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_tradeauto_toggle(interaction: discord.Interaction, enabled: bool) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    data = get_trade_auto_config(interaction.guild.id)
+    data["image_reminder_enabled"] = bool(enabled)
+    data["dmo_forward_enabled"] = bool(enabled)
+    await save_server_settings()
+    await interaction.response.send_message(
+        f"✅ Trade auto features {'enabled' if enabled else 'disabled'}.",
+        embed=build_trade_auto_embed(interaction.guild),
+        ephemeral=True,
+    )
+
+
+@tradeauto_group.command(name="reset", description="Reset trade auto settings to the default IDs you requested")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_tradeauto_reset(interaction: discord.Interaction) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    reset_trade_auto_config(interaction.guild.id)
+    await save_server_settings()
+    await interaction.response.send_message(
+        "✅ Trade auto settings reset to default category/channel IDs.",
+        embed=build_trade_auto_embed(interaction.guild),
+        ephemeral=True,
+    )
+
+
+bot.tree.add_command(tradeauto_group)
+
+
 @bot.tree.command(name="tickets", description="Post the ticket panel in this channel")
 @app_commands.checks.has_permissions(administrator=True)
 async def slash_tickets(interaction: discord.Interaction) -> None:
@@ -6704,6 +7747,159 @@ async def slash_clearsmartmessages(interaction: discord.Interaction) -> None:
         smart_messages[str(interaction.guild.id)] = {}
         await save_smart_messages()
     await interaction.response.send_message("✅ Removed all smart messages in this server.", ephemeral=True)
+
+
+@bot.tree.command(name="aisetup", description="Enable or disable the optional XSI AI layer")
+@app_commands.describe(
+    enabled="Turn AI on or off",
+    personality="Optional custom AI personality/system instruction",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_aisetup(interaction: discord.Interaction, enabled: bool, personality: str | None = None) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    ai_data = get_ai_config(interaction.guild.id)
+    ai_data["enabled"] = bool(enabled)
+    if personality:
+        ai_data["personality"] = truncate_discord_text(personality, 1800, DEFAULT_AI_PERSONALITY)
+    await save_server_settings()
+    key_note = "" if openai_api_key() else f"\n⚠️ Add `{AI_API_KEY_NAME}` in Railway variables before AI can answer."
+    await interaction.response.send_message(
+        f"✅ XSI AI {'enabled' if enabled else 'disabled'}.{key_note}",
+        ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@bot.tree.command(name="aisettings", description="Show optional XSI AI settings")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_aisettings(interaction: discord.Interaction) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    await interaction.response.send_message(embed=build_ai_settings_embed(interaction.guild), ephemeral=True)
+
+
+@bot.tree.command(name="aichannel", description="Enable or disable AI auto-replies in a channel")
+@app_commands.describe(
+    enabled="Turn AI replies on/off for this channel",
+    channel="Optional channel. Defaults to the current channel.",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_aichannel(interaction: discord.Interaction, enabled: bool, channel: discord.TextChannel | None = None) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    target = channel if channel is not None else interaction.channel
+    if not isinstance(target, discord.TextChannel):
+        await interaction.response.send_message("❌ Pick a text channel.", ephemeral=True)
+        return
+    ai_data = get_ai_config(interaction.guild.id)
+    ids = ai_data.setdefault("reply_channel_ids", [])
+    existing_ids = [_safe_int(old, 0) for old in ids]
+    if enabled:
+        if target.id not in existing_ids:
+            ids.append(target.id)
+        ai_data["enabled"] = True
+    else:
+        ai_data["reply_channel_ids"] = [old for old in ids if _safe_int(old, 0) != target.id]
+    await save_server_settings()
+    key_note = "" if openai_api_key() or not enabled else f"\n⚠️ Add `{AI_API_KEY_NAME}` in Railway variables before AI can answer."
+    await interaction.response.send_message(
+        f"✅ AI auto-replies {'enabled' if enabled else 'disabled'} in {target.mention}.{key_note}",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="aimodel", description="Set or view the AI model name")
+@app_commands.describe(model="Model name. Leave blank to view current model.")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_aimodel(interaction: discord.Interaction, model: str = "") -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    ai_data = get_ai_config(interaction.guild.id)
+    clean_model = model.strip()
+    if not clean_model:
+        await interaction.response.send_message(f"Current AI model: `{ai_data.get('model') or DEFAULT_AI_MODEL}`", ephemeral=True)
+        return
+    ai_data["model"] = clean_model[:100]
+    await save_server_settings()
+    await interaction.response.send_message(f"✅ AI model set to `{ai_data['model']}`.", ephemeral=True)
+
+
+@bot.tree.command(name="aimodwatch", description="Enable or disable AI staff alerts for risky messages")
+@app_commands.describe(enabled="Turn AI moderation watch on/off. It only alerts staff logs.")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_aimodwatch(interaction: discord.Interaction, enabled: bool) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    ai_data = get_ai_config(interaction.guild.id)
+    ai_data["enabled"] = True if enabled else bool(ai_data.get("enabled", False))
+    ai_data["moderation_watch_enabled"] = bool(enabled)
+    await save_server_settings()
+    await interaction.response.send_message(
+        "✅ AI moderation watch enabled. It only alerts staff logs; it does not punish automatically."
+        if enabled else "✅ AI moderation watch disabled.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="aiask", description="Ask XSI AI a question")
+@app_commands.describe(question="What you want to ask XSI AI", ephemeral="Whether only you can see the answer")
+async def slash_aiask(interaction: discord.Interaction, question: str, ephemeral: bool = True) -> None:
+    if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This only works inside a server text channel.", ephemeral=True)
+        return
+    ready, reason = ai_is_ready(interaction.guild.id)
+    if not ready:
+        await interaction.response.send_message(reason, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+        return
+    ai_data = get_ai_config(interaction.guild.id)
+    allowed, remaining = check_ai_cooldown(interaction.guild.id, interaction.user.id, "aiask", int(ai_data.get("cooldown_seconds", AI_COOLDOWN_SECONDS)))
+    if not allowed:
+        await interaction.response.send_message(f"⏳ AI cooldown: try again in {remaining}s.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=ephemeral, thinking=True)
+    context = await collect_channel_context(interaction.channel, AI_CHAT_CONTEXT_LIMIT)
+    prompt = f"Answer this server member's question.\nQuestion: {question}\n\nRecent channel context:\n{context or 'No context.'}"
+    try:
+        answer = await ai_generate_text(interaction.guild, prompt, purpose="slash aiask", member=interaction.user)
+    except Exception as exc:
+        log.exception("Slash AI ask failed: %s", exc)
+        await interaction.followup.send("❌ AI request failed. Check Railway logs, API key, and model name.", ephemeral=ephemeral)
+        return
+    await interaction.followup.send("🧠 **XSI AI:**\n" + answer, ephemeral=ephemeral, allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.tree.command(name="aiticket", description="Use AI to summarize a ticket or draft a staff reply")
+@app_commands.describe(mode="summary, reply, or checklist", ephemeral="Whether only you can see the answer")
+@app_commands.choices(
+    mode=[
+        app_commands.Choice(name="Summary", value="summary"),
+        app_commands.Choice(name="Staff reply draft", value="reply"),
+        app_commands.Choice(name="Checklist / next steps", value="checklist"),
+    ]
+)
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_aiticket(interaction: discord.Interaction, mode: str = "summary", ephemeral: bool = True) -> None:
+    if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This only works inside a server text channel.", ephemeral=True)
+        return
+    ready, reason = ai_is_ready(interaction.guild.id)
+    if not ready:
+        await interaction.response.send_message(reason, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+        return
+    await interaction.response.defer(ephemeral=ephemeral, thinking=True)
+    try:
+        answer = await generate_ticket_ai(interaction.channel, interaction.user, mode)
+    except Exception as exc:
+        log.exception("Slash AI ticket helper failed: %s", exc)
+        await interaction.followup.send("❌ AI ticket helper failed. Check Railway logs, API key, and model name.", ephemeral=ephemeral)
+        return
+    await interaction.followup.send(f"🧠 **XSI AI ticket {mode}:**\n{answer}", ephemeral=ephemeral, allowed_mentions=discord.AllowedMentions.none())
 
 
 @bot.tree.command(name="sallyspeak", description="Make XSI say a message")
@@ -7010,4 +8206,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
