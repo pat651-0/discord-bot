@@ -27,8 +27,8 @@ from discord.ext import commands, tasks
 # python xsi_bot_full_setup_requiredpermissions.py
 # ============================================================
 
-VERSION = "XSI full setup build 2026-07-04 / ai-smartness-trade-auto-v12"
-BUILD_TAG = "XSI-AI-SMARTNESS-TRADE-AUTO-V12"
+VERSION = "XSI full setup build 2026-07-04 / ai-smartness-trade-auto-v15-owner-only-dmo"
+BUILD_TAG = "XSI-AI-SMARTNESS-TRADE-AUTO-V15-OWNER-ONLY-DMO"
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
@@ -97,8 +97,26 @@ AI_MODERATION_MIN_SCORE = int(os.getenv("XSI_AI_MODERATION_MIN_SCORE", "80"))
 DEFAULT_TRADE_TICKET_LINK = "https://discord.com/channels/1421901802353201194/1472896391717195807"
 DEFAULT_TRADE_IMAGE_CATEGORY_IDS = [1504234792789479666, 1504233704514523136]
 DEFAULT_TRADE_DMO_TARGET_CHANNEL_ID = 1501943323760394300
+# By default, Auto DMO forwarding only triggers from your Discord user ID.
+DEFAULT_TRADE_DMO_OWNER_ONLY = True
+DEFAULT_TRADE_DMO_ALLOWED_USER_IDS = [1137385938155221073]
 DEFAULT_TRADE_IMAGE_REMINDER_MESSAGE = f"Please Create a Ticket to Trade\n{DEFAULT_TRADE_TICKET_LINK}"
+DEFAULT_TRADE_IMAGE_REMINDER_COOLDOWN_SECONDS = 120
 DEFAULT_TRADE_DMO_TRIGGER = "DMO for Trade"
+DEFAULT_TRADE_DMO_TRIGGERS = [
+    "DMO for Trade",
+    "DMO trade",
+    "DMO trades",
+    "for DMO",
+    "DMO 4 trade",
+    "DMO for trades",
+    "DMO ft",
+    "DMO f/t",
+    "dmo-for-trade",
+    "#dmo-for-trade",
+]
+MAX_TRADE_DMO_TRIGGERS = 25
+MAX_TRADE_DMO_FORWARDED_CACHE = 200
 
 MAX_WARNINGS = 3
 SPAM_LIMIT = 5
@@ -479,10 +497,17 @@ def default_guild_config() -> dict[str, Any]:
             "image_reminder_enabled": True,
             "image_category_ids": DEFAULT_TRADE_IMAGE_CATEGORY_IDS.copy(),
             "image_reminder_message": DEFAULT_TRADE_IMAGE_REMINDER_MESSAGE,
+            "image_reminder_cooldown_seconds": DEFAULT_TRADE_IMAGE_REMINDER_COOLDOWN_SECONDS,
+            "image_reminder_last_message_ids": {},
+            "image_reminder_last_sent_at_by_channel": {},
             "dmo_forward_enabled": True,
+            "dmo_owner_only": DEFAULT_TRADE_DMO_OWNER_ONLY,
+            "dmo_allowed_user_ids": DEFAULT_TRADE_DMO_ALLOWED_USER_IDS.copy(),
             "dmo_trigger": DEFAULT_TRADE_DMO_TRIGGER,
+            "dmo_triggers": DEFAULT_TRADE_DMO_TRIGGERS.copy(),
             "dmo_target_channel_id": DEFAULT_TRADE_DMO_TARGET_CHANNEL_ID,
-            "dmo_include_original_link": True,
+            "dmo_include_original_link": False,
+            "dmo_forwarded_message_ids": [],
         },
         "temporary_unavailable": None,
         "last_availability_status": None,
@@ -572,11 +597,50 @@ def ensure_guild_config(guild_id: int) -> dict[str, Any]:
         )
         trade_data["image_reminder_enabled"] = bool(trade_data.get("image_reminder_enabled", True))
         trade_data["dmo_forward_enabled"] = bool(trade_data.get("dmo_forward_enabled", True))
-        trade_data["dmo_include_original_link"] = bool(trade_data.get("dmo_include_original_link", True))
+        trade_data["dmo_owner_only"] = bool(trade_data.get("dmo_owner_only", DEFAULT_TRADE_DMO_OWNER_ONLY))
+        if not isinstance(trade_data.get("dmo_allowed_user_ids"), list):
+            trade_data["dmo_allowed_user_ids"] = DEFAULT_TRADE_DMO_ALLOWED_USER_IDS.copy()
+            changed = True
+        trade_data["dmo_allowed_user_ids"] = clean_trade_auto_ids(trade_data.get("dmo_allowed_user_ids", []))[:25]
+        if trade_data["dmo_owner_only"] and not trade_data["dmo_allowed_user_ids"]:
+            trade_data["dmo_allowed_user_ids"] = DEFAULT_TRADE_DMO_ALLOWED_USER_IDS.copy()
+            changed = True
+        trade_data["dmo_include_original_link"] = bool(trade_data.get("dmo_include_original_link", False))
         trade_data["dmo_trigger"] = str(trade_data.get("dmo_trigger") or DEFAULT_TRADE_DMO_TRIGGER).strip() or DEFAULT_TRADE_DMO_TRIGGER
+        if not isinstance(trade_data.get("dmo_triggers"), list):
+            trade_data["dmo_triggers"] = DEFAULT_TRADE_DMO_TRIGGERS.copy()
+            changed = True
+        else:
+            trade_data["dmo_triggers"] = clean_trade_dmo_triggers(trade_data.get("dmo_triggers", []), trade_data.get("dmo_trigger"))
+        if not trade_data["dmo_triggers"]:
+            trade_data["dmo_triggers"] = DEFAULT_TRADE_DMO_TRIGGERS.copy()
+            changed = True
+        if not isinstance(trade_data.get("dmo_forwarded_message_ids"), list):
+            trade_data["dmo_forwarded_message_ids"] = []
+            changed = True
+        else:
+            trade_data["dmo_forwarded_message_ids"] = [
+                str(message_id)
+                for message_id in trade_data.get("dmo_forwarded_message_ids", [])[-MAX_TRADE_DMO_FORWARDED_CACHE:]
+                if str(message_id).strip()
+            ]
         trade_data["image_reminder_message"] = str(
             trade_data.get("image_reminder_message") or DEFAULT_TRADE_IMAGE_REMINDER_MESSAGE
         ).strip() or DEFAULT_TRADE_IMAGE_REMINDER_MESSAGE
+        try:
+            trade_data["image_reminder_cooldown_seconds"] = max(
+                0,
+                min(3600, int(trade_data.get("image_reminder_cooldown_seconds", DEFAULT_TRADE_IMAGE_REMINDER_COOLDOWN_SECONDS))),
+            )
+        except (TypeError, ValueError):
+            trade_data["image_reminder_cooldown_seconds"] = DEFAULT_TRADE_IMAGE_REMINDER_COOLDOWN_SECONDS
+            changed = True
+        if not isinstance(trade_data.get("image_reminder_last_message_ids"), dict):
+            trade_data["image_reminder_last_message_ids"] = {}
+            changed = True
+        if not isinstance(trade_data.get("image_reminder_last_sent_at_by_channel"), dict):
+            trade_data["image_reminder_last_sent_at_by_channel"] = {}
+            changed = True
 
     if changed:
         server_settings[gid] = data
@@ -2750,6 +2814,85 @@ def reset_trade_auto_config(guild_id: int) -> dict[str, Any]:
     return config["trade_auto"]
 
 
+
+def clean_trade_dmo_allowed_user_ids(*values: Any) -> list[int]:
+    """Return deduped Discord user IDs allowed to trigger Auto DMO forwarding.
+
+    Accepts raw IDs, Discord mentions like <@123>, lists/sets, or integers.
+    """
+    allowed: list[int] = []
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple, set)):
+            for nested_id in clean_trade_dmo_allowed_user_ids(*value):
+                if nested_id not in allowed:
+                    allowed.append(nested_id)
+            continue
+        raw = str(value).strip()
+        if not raw:
+            continue
+        for part in re.findall(r"\d{5,25}", raw):
+            user_id = _safe_int(part, 0)
+            if user_id > 0 and user_id not in allowed:
+                allowed.append(user_id)
+    return allowed[:25]
+
+
+def dmo_author_is_allowed(message: discord.Message, data: dict[str, Any]) -> bool:
+    if not bool(data.get("dmo_owner_only", DEFAULT_TRADE_DMO_OWNER_ONLY)):
+        return True
+    allowed_ids = clean_trade_dmo_allowed_user_ids(data.get("dmo_allowed_user_ids", []))
+    if not allowed_ids:
+        allowed_ids = DEFAULT_TRADE_DMO_ALLOWED_USER_IDS.copy()
+    return message.author.id in set(allowed_ids)
+
+
+def format_dmo_allowed_users(guild: discord.Guild, data: dict[str, Any]) -> str:
+    if not bool(data.get("dmo_owner_only", DEFAULT_TRADE_DMO_OWNER_ONLY)):
+        return "Anyone can trigger Auto DMO forwarding"
+    allowed_ids = clean_trade_dmo_allowed_user_ids(data.get("dmo_allowed_user_ids", [])) or DEFAULT_TRADE_DMO_ALLOWED_USER_IDS.copy()
+    lines = []
+    for user_id in allowed_ids[:10]:
+        member = guild.get_member(user_id)
+        lines.append(member.mention if member is not None else f"<@{user_id}>")
+    return "Owner-only: " + (", ".join(lines) if lines else "No users set")
+
+
+def clean_trade_dmo_triggers(*values: Any) -> list[str]:
+    """Return a deduped, safe trigger phrase list for Auto DMO detection."""
+    triggers: list[str] = []
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple, set)):
+            nested = clean_trade_dmo_triggers(*value)
+            for nested_trigger in nested:
+                if nested_trigger.lower() not in {old.lower() for old in triggers}:
+                    triggers.append(nested_trigger)
+            continue
+        raw = str(value).strip()
+        if not raw:
+            continue
+        # Allow admins to paste one phrase per line, or separate phrases with | or ;.
+        for part in re.split(r"\s*(?:\n|\||;)\s*", raw):
+            clean = re.sub(r"\s+", " ", part).strip()
+            clean = clean.strip("`\"'")
+            if not clean:
+                continue
+            clean = truncate_discord_text(clean, 80, DEFAULT_TRADE_DMO_TRIGGER)
+            if clean.lower() not in {old.lower() for old in triggers}:
+                triggers.append(clean)
+            if len(triggers) >= MAX_TRADE_DMO_TRIGGERS:
+                return triggers
+    return triggers
+
+
+def reset_trade_dmo_triggers(data: dict[str, Any]) -> list[str]:
+    data["dmo_trigger"] = DEFAULT_TRADE_DMO_TRIGGER
+    data["dmo_triggers"] = DEFAULT_TRADE_DMO_TRIGGERS.copy()
+    return data["dmo_triggers"]
+
 def clean_trade_auto_ids(*values: Any) -> list[int]:
     ids: list[int] = []
     for value in values:
@@ -2787,16 +2930,50 @@ def trade_auto_channel_mention(channel: discord.abc.Messageable) -> str:
     return "Unknown channel"
 
 
-def trade_auto_matches_dmo_trigger(content: str, trigger: str) -> bool:
-    clean_content = normalize_text(content or "")
-    clean_trigger = normalize_text(trigger or DEFAULT_TRADE_DMO_TRIGGER)
-    if not clean_content or not clean_trigger:
+def trade_auto_dmo_match_text(text: str) -> str:
+    value = normalize_text(text or "")
+    value = re.sub(r"[#*_`~>]+", " ", value)
+    value = re.sub(r"[-_/\\]+", " ", value)
+    value = re.sub(r"[^a-z0-9()\s]+", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def trade_auto_matches_dmo_trigger(content: str, triggers: Any) -> bool:
+    """Match Auto DMO phrases without requiring exact casing/punctuation.
+
+    This catches the common forms you asked for, including:
+    - DMO for Trade
+    - (DMO for Trade)
+    - DMO trade / DMO trades
+    - for DMO
+    - DMO 4 trade / dmo-for-trade / #dmo-for-trade
+    """
+    clean_content = trade_auto_dmo_match_text(content or "")
+    if not clean_content:
         return False
-    if clean_trigger in clean_content:
-        return True
-    # Also catch parenthesized forms like "(DMO for Trade)" even with extra spaces.
-    escaped = re.escape(clean_trigger).replace(r"\ ", r"\s+")
-    return bool(re.search(rf"\(\s*{escaped}\s*\)", clean_content, flags=re.IGNORECASE))
+
+    trigger_list = clean_trade_dmo_triggers(triggers)
+    if not trigger_list:
+        trigger_list = DEFAULT_TRADE_DMO_TRIGGERS.copy()
+
+    for trigger in trigger_list:
+        clean_trigger = trade_auto_dmo_match_text(trigger)
+        if clean_trigger and clean_trigger in clean_content:
+            return True
+        if clean_trigger:
+            escaped = re.escape(clean_trigger).replace(r"\ ", r"\s+")
+            if re.search(rf"\(\s*{escaped}\s*\)", clean_content, flags=re.IGNORECASE):
+                return True
+
+    auto_patterns = [
+        r"\bdmo\s*(?:for|4)\s*trades?\b",
+        r"\bdmo\s*trades?\b",
+        r"\btrades?\s*(?:for|4)\s*dmo\b",
+        r"\bfor\s*dmo\b",
+        r"\bdmo\s*f\s*t\b",
+    ]
+    return any(re.search(pattern, clean_content, flags=re.IGNORECASE) for pattern in auto_patterns)
 
 
 def format_trade_auto_category_list(guild: discord.Guild, ids: list[Any]) -> str:
@@ -2831,14 +3008,19 @@ def build_trade_auto_embed(guild: discord.Guild) -> discord.Embed:
         inline=True,
     )
     embed.add_field(name="DMO target", value=target_text, inline=True)
+    embed.add_field(name="DMO trigger users", value=format_dmo_allowed_users(guild, data)[:1024], inline=False)
     embed.add_field(name="Image categories", value=format_trade_auto_category_list(guild, data.get("image_category_ids", []))[:1024], inline=False)
     embed.add_field(name="Reminder message", value=truncate_discord_text(data.get("image_reminder_message"), 1024, DEFAULT_TRADE_IMAGE_REMINDER_MESSAGE), inline=False)
-    embed.add_field(name="DMO trigger", value=f"`{data.get('dmo_trigger') or DEFAULT_TRADE_DMO_TRIGGER}`", inline=True)
+    embed.add_field(name="Reminder cooldown", value=f"`{_safe_int(data.get('image_reminder_cooldown_seconds'), DEFAULT_TRADE_IMAGE_REMINDER_COOLDOWN_SECONDS)} seconds`", inline=True)
+    embed.add_field(name="Old reminder cleanup", value="✅ Deletes the previous bot reminder before posting the new one", inline=True)
+    dmo_triggers = clean_trade_dmo_triggers(data.get("dmo_triggers", []), data.get("dmo_trigger")) or DEFAULT_TRADE_DMO_TRIGGERS.copy()
+    embed.add_field(name="DMO triggers", value="\n".join(f"`{trigger}`" for trigger in dmo_triggers[:12])[:1024], inline=False)
+    embed.add_field(name="DMO format", value="Simple copy/forward only — no detection header", inline=True)
     embed.add_field(
         name="Slash commands",
         value=(
-            "`/tradeauto status` • `/tradeauto image` • `/tradeauto dmo` • `/tradeauto reset`\n"
-            "Defaults are already set to your two category IDs and target channel ID."
+            "`/tradeauto status` • `/tradeauto image` • `/tradeauto dmo` • `/tradeauto dmoowneronly` • `/tradeauto dmoallowed` • `/tradeauto dmotriggers` • `/tradeauto cooldown` • `/tradeauto reset`\n"
+            "Defaults are already set to your two category IDs, target channel ID, and owner-only DMO forwarding."
         ),
         inline=False,
     )
@@ -2846,6 +3028,13 @@ def build_trade_auto_embed(guild: discord.Guild) -> discord.Embed:
 
 
 async def maybe_send_trade_image_reminder(message: discord.Message, data: dict[str, Any]) -> bool:
+    """Send one ticket reminder per channel, replacing the old one.
+
+    This prevents spam when several car pictures are posted back-to-back. If the
+    cooldown has not expired, the bot does nothing. When the cooldown expires, it
+    deletes the previous bot reminder in that channel/thread and posts a fresh
+    reminder below the newest image.
+    """
     if not bool(data.get("image_reminder_enabled", True)):
         return False
     if not isinstance(message.channel, (discord.TextChannel, discord.Thread)):
@@ -2858,26 +3047,82 @@ async def maybe_send_trade_image_reminder(message: discord.Message, data: dict[s
     if category_id not in watched_categories:
         return False
 
+    channel_key = str(message.channel.id)
+    now = time.time()
+    cooldown_seconds = _safe_int(
+        data.get("image_reminder_cooldown_seconds"),
+        DEFAULT_TRADE_IMAGE_REMINDER_COOLDOWN_SECONDS,
+    )
+    cooldown_seconds = max(0, min(3600, cooldown_seconds))
+
+    last_sent_by_channel = data.setdefault("image_reminder_last_sent_at_by_channel", {})
+    if not isinstance(last_sent_by_channel, dict):
+        last_sent_by_channel = {}
+        data["image_reminder_last_sent_at_by_channel"] = last_sent_by_channel
+
+    try:
+        last_sent = float(last_sent_by_channel.get(channel_key, 0) or 0)
+    except (TypeError, ValueError):
+        last_sent = 0
+
+    if cooldown_seconds > 0 and now - last_sent < cooldown_seconds:
+        return False
+
+    last_message_ids = data.setdefault("image_reminder_last_message_ids", {})
+    if not isinstance(last_message_ids, dict):
+        last_message_ids = {}
+        data["image_reminder_last_message_ids"] = last_message_ids
+
+    old_message_id = _safe_int(last_message_ids.get(channel_key), 0)
+    if old_message_id:
+        try:
+            old_message = await message.channel.fetch_message(old_message_id)
+            # Only delete the bot reminder we previously saved.
+            if old_message.author.id == (bot.user.id if bot.user else 0):
+                await old_message.delete()
+        except discord.HTTPException:
+            pass
+
     reminder = truncate_discord_text(
         data.get("image_reminder_message"),
         1900,
         DEFAULT_TRADE_IMAGE_REMINDER_MESSAGE,
     )
     try:
-        await message.channel.send(reminder, allowed_mentions=discord.AllowedMentions.none())
+        sent_message = await message.channel.send(reminder, allowed_mentions=discord.AllowedMentions.none())
+        last_message_ids[channel_key] = sent_message.id
+        last_sent_by_channel[channel_key] = now
+        data["image_reminder_cooldown_seconds"] = cooldown_seconds
+        await save_server_settings()
         return True
     except discord.HTTPException as exc:
         log.warning("Trade image reminder failed: %s", exc)
         return False
 
-
 async def maybe_forward_dmo_trade_message(message: discord.Message, data: dict[str, Any]) -> bool:
+    """Copy/forward a DMO-for-trade post to the saved target channel.
+
+    The target post is intentionally clean: no "DMO detected" header, no From/ID
+    block, and no channel diagnostics. It copies the message text and re-uploads
+    attached files when Discord allows it. If re-uploading an attachment fails,
+    it falls back to the attachment URL.
+    """
     if message.guild is None:
         return False
     if not bool(data.get("dmo_forward_enabled", True)):
         return False
-    trigger = str(data.get("dmo_trigger") or DEFAULT_TRADE_DMO_TRIGGER)
-    if not trade_auto_matches_dmo_trigger(message.content or "", trigger):
+    if not dmo_author_is_allowed(message, data):
+        return False
+    triggers = clean_trade_dmo_triggers(data.get("dmo_triggers", []), data.get("dmo_trigger"))
+    if not trade_auto_matches_dmo_trigger(message.content or "", triggers):
+        return False
+
+    forwarded_message_ids = data.setdefault("dmo_forwarded_message_ids", [])
+    if not isinstance(forwarded_message_ids, list):
+        forwarded_message_ids = []
+        data["dmo_forwarded_message_ids"] = forwarded_message_ids
+    message_id_text = str(message.id)
+    if message_id_text in {str(old_id) for old_id in forwarded_message_ids}:
         return False
 
     target_channel_id = _safe_int(data.get("dmo_target_channel_id"), DEFAULT_TRADE_DMO_TARGET_CHANNEL_ID)
@@ -2892,35 +3137,48 @@ async def maybe_forward_dmo_trade_message(message: discord.Message, data: dict[s
         )
         return False
 
-    attachment_lines: list[str] = []
-    for attachment in message.attachments[:5]:
-        filename = truncate_discord_text(getattr(attachment, "filename", "attachment"), 80, "attachment")
-        url = truncate_discord_text(getattr(attachment, "url", ""), 240, "")
-        if url:
-            attachment_lines.append(f"- {filename}: {url}")
+    outbound_text = truncate_discord_text(message.content or "", 1700, "").strip()
+    files: list[discord.File] = []
+    fallback_attachment_urls: list[str] = []
 
-    author_text = f"{message.author} (`{message.author.id}`)"
-    original_text = message.jump_url if bool(data.get("dmo_include_original_link", True)) else "Link disabled"
-    lines = [
-        "📢 **DMO for Trade detected**",
-        f"From: {author_text}",
-        f"Channel: {trade_auto_channel_mention(message.channel)}",
-        f"Original: {original_text}",
-        "",
-        "**Message:**",
-        truncate_discord_text(message.content, 1100, "[no text content]"),
-    ]
-    if attachment_lines:
-        lines.extend(["", "**Attachments:**", *attachment_lines])
+    for attachment in message.attachments[:10]:
+        try:
+            files.append(await attachment.to_file())
+        except discord.HTTPException:
+            url = str(getattr(attachment, "url", "") or "").strip()
+            if url:
+                fallback_attachment_urls.append(url)
+        except Exception as exc:
+            log.warning("Trade auto DMO attachment copy failed: %s", exc)
+            url = str(getattr(attachment, "url", "") or "").strip()
+            if url:
+                fallback_attachment_urls.append(url)
 
-    outbound = truncate_discord_text("\n".join(lines), 1900, "📢 DMO for Trade detected.")
+    if fallback_attachment_urls:
+        urls_text = "\n".join(fallback_attachment_urls[:10])
+        outbound_text = truncate_discord_text((outbound_text + "\n" + urls_text).strip(), 1900, urls_text)
+
+    # If there is somehow no text and no copied attachment, keep a tiny fallback
+    # so staff can still reach the original post.
+    if not outbound_text and not files:
+        outbound_text = message.jump_url if bool(data.get("dmo_include_original_link", False)) else "DMO for Trade"
+
     try:
-        await target_channel.send(outbound, allowed_mentions=discord.AllowedMentions.none())
+        if files:
+            await target_channel.send(
+                content=outbound_text or None,
+                files=files,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        else:
+            await target_channel.send(outbound_text, allowed_mentions=discord.AllowedMentions.none())
+        forwarded_message_ids.append(message_id_text)
+        data["dmo_forwarded_message_ids"] = forwarded_message_ids[-MAX_TRADE_DMO_FORWARDED_CACHE:]
+        await save_server_settings()
         return True
     except discord.HTTPException as exc:
         log.warning("Trade auto DMO forward failed: %s", exc)
         return False
-
 
 async def maybe_handle_trade_auto(message: discord.Message) -> bool:
     if message.guild is None or message.author.bot:
@@ -6236,12 +6494,124 @@ async def tradeauto_prefix(ctx: commands.Context, mode: str = "status", *, value
         if value_clean in {"on", "enable", "enabled", "true", "yes", ""}:
             data["dmo_forward_enabled"] = True
             await save_server_settings()
-            await ctx.send("✅ DMO-for-trade repost enabled.")
+            await ctx.send("✅ DMO-for-trade repost enabled. It will now copy/forward cleanly with no detection header.")
             return
 
+
+    if mode_clean in {"dmoowneronly", "owneronly", "mineonly", "dmomineonly"}:
+        if value_clean in {"off", "disable", "disabled", "false", "no", "anyone", "everyone"}:
+            data["dmo_owner_only"] = False
+            await save_server_settings()
+            await ctx.send("✅ DMO repost can now be triggered by anyone using a DMO phrase.")
+            return
+        if value_clean in {"on", "enable", "enabled", "true", "yes", "me", "mine", "owner", ""}:
+            data["dmo_owner_only"] = True
+            if not clean_trade_dmo_allowed_user_ids(data.get("dmo_allowed_user_ids", [])):
+                data["dmo_allowed_user_ids"] = DEFAULT_TRADE_DMO_ALLOWED_USER_IDS.copy()
+            await save_server_settings()
+            await ctx.send("✅ DMO repost is now owner-only. Only allowed user IDs can trigger the forward.", embed=build_trade_auto_embed(ctx.guild))
+            return
+
+    if mode_clean in {"dmoallowed", "allowed", "allowedusers", "dmousers"}:
+        parts = value.split(maxsplit=1)
+        action = parts[0].lower().strip() if parts else "list"
+        rest = parts[1].strip() if len(parts) > 1 else ""
+
+        if action in {"list", "show", "status", ""}:
+            await ctx.send("✅ Auto DMO allowed users: " + format_dmo_allowed_users(ctx.guild, data))
+            return
+
+        if action in {"reset", "default", "defaults"}:
+            data["dmo_owner_only"] = True
+            data["dmo_allowed_user_ids"] = DEFAULT_TRADE_DMO_ALLOWED_USER_IDS.copy()
+            await save_server_settings()
+            await ctx.send("✅ Auto DMO allowed users reset to your Discord ID only.", embed=build_trade_auto_embed(ctx.guild))
+            return
+
+        if action in {"add", "+"}:
+            ids = clean_trade_dmo_allowed_user_ids(rest)
+            if not ids:
+                await ctx.send("❌ Add a Discord user ID or mention. Example: `!tradeauto dmoallowed add 1137385938155221073`")
+                return
+            data["dmo_owner_only"] = True
+            data["dmo_allowed_user_ids"] = clean_trade_dmo_allowed_user_ids(data.get("dmo_allowed_user_ids", []), ids)
+            await save_server_settings()
+            await ctx.send("✅ User added to Auto DMO allowed list.", embed=build_trade_auto_embed(ctx.guild))
+            return
+
+        if action in {"remove", "delete", "del", "-"}:
+            ids = set(clean_trade_dmo_allowed_user_ids(rest))
+            if not ids:
+                await ctx.send("❌ Tell me which Discord user ID or mention to remove.")
+                return
+            data["dmo_allowed_user_ids"] = [user_id for user_id in clean_trade_dmo_allowed_user_ids(data.get("dmo_allowed_user_ids", [])) if user_id not in ids]
+            if not data["dmo_allowed_user_ids"]:
+                data["dmo_allowed_user_ids"] = DEFAULT_TRADE_DMO_ALLOWED_USER_IDS.copy()
+            await save_server_settings()
+            await ctx.send("✅ User removed from Auto DMO allowed list.", embed=build_trade_auto_embed(ctx.guild))
+            return
+
+        await ctx.send("❌ Use `!tradeauto dmoallowed list`, `add USER_ID`, `remove USER_ID`, or `reset`.")
+        return
+
+    if mode_clean in {"dmotriggers", "dmotrigger", "triggers", "trigger"}:
+        parts = value.split(maxsplit=1)
+        action = parts[0].lower().strip() if parts else "list"
+        phrase = parts[1].strip() if len(parts) > 1 else ""
+
+        if action in {"list", "show", "status", ""}:
+            triggers = clean_trade_dmo_triggers(data.get("dmo_triggers", []), data.get("dmo_trigger")) or DEFAULT_TRADE_DMO_TRIGGERS.copy()
+            await ctx.send("✅ Auto DMO triggers:\n" + "\n".join(f"- `{trigger}`" for trigger in triggers))
+            return
+
+        if action in {"reset", "default", "defaults"}:
+            reset_trade_dmo_triggers(data)
+            await save_server_settings()
+            await ctx.send("✅ Auto DMO triggers reset to the default smart list.")
+            return
+
+        if action in {"add", "+"}:
+            new_triggers = clean_trade_dmo_triggers(phrase)
+            if not new_triggers:
+                await ctx.send("❌ Add a trigger phrase. Example: `!tradeauto dmotriggers add DMO trade`")
+                return
+            data["dmo_triggers"] = clean_trade_dmo_triggers(data.get("dmo_triggers", []), new_triggers)
+            await save_server_settings()
+            await ctx.send("✅ Auto DMO trigger added.", embed=build_trade_auto_embed(ctx.guild))
+            return
+
+        if action in {"remove", "delete", "del", "-"}:
+            if not phrase:
+                await ctx.send("❌ Tell me which trigger to remove. Example: `!tradeauto dmotriggers remove for DMO`")
+                return
+            remove_key = trade_auto_dmo_match_text(phrase)
+            data["dmo_triggers"] = [
+                trigger for trigger in clean_trade_dmo_triggers(data.get("dmo_triggers", []))
+                if trade_auto_dmo_match_text(trigger) != remove_key
+            ]
+            if not data["dmo_triggers"]:
+                reset_trade_dmo_triggers(data)
+            await save_server_settings()
+            await ctx.send("✅ Auto DMO trigger removed.", embed=build_trade_auto_embed(ctx.guild))
+            return
+
+        await ctx.send("❌ Use `!tradeauto dmotriggers list`, `add PHRASE`, `remove PHRASE`, or `reset`.")
+        return
+
+    if mode_clean in {"cooldown", "cd", "delay"}:
+        try:
+            seconds = max(0, min(3600, int(value_clean or DEFAULT_TRADE_IMAGE_REMINDER_COOLDOWN_SECONDS)))
+        except ValueError:
+            await ctx.send("❌ Cooldown must be a number of seconds, for example `!tradeauto cooldown 120`.")
+            return
+        data["image_reminder_cooldown_seconds"] = seconds
+        await save_server_settings()
+        await ctx.send(f"✅ Trade image reminder cooldown set to `{seconds}` seconds.")
+        return
+
     await ctx.send(
-        "❌ Use `!tradeauto status`, `!tradeauto on`, `!tradeauto off`, `!tradeauto image on/off`, `!tradeauto dmo on/off`, or `!tradeauto reset`.\n"
-        "For channel/category setup, use slash commands: `/tradeauto image` and `/tradeauto dmo`."
+        "❌ Use `!tradeauto status`, `!tradeauto on`, `!tradeauto off`, `!tradeauto image on/off`, `!tradeauto dmo on/off`, `!tradeauto dmoowneronly on/off`, `!tradeauto dmoallowed list/add/remove/reset`, `!tradeauto dmotriggers list/add/remove/reset`, `!tradeauto cooldown 120`, or `!tradeauto reset`.\n"
+        "For channel/category setup, use slash commands: `/tradeauto image`, `/tradeauto dmo`, and `/tradeauto cooldown`."
     )
 
 
@@ -7383,6 +7753,7 @@ async def slash_tradeauto_status(interaction: discord.Interaction) -> None:
     category_2="Second category ID to watch for images",
     extra_categories="Optional extra category IDs separated by spaces or commas",
     message="Optional reminder message. Leave blank to keep current message.",
+    cooldown_seconds="Seconds to wait before posting/replacing the reminder again. Default 120.",
 )
 @app_commands.checks.has_permissions(administrator=True)
 async def slash_tradeauto_image(
@@ -7392,6 +7763,7 @@ async def slash_tradeauto_image(
     category_2: str = "",
     extra_categories: str = "",
     message: str | None = None,
+    cooldown_seconds: int = DEFAULT_TRADE_IMAGE_REMINDER_COOLDOWN_SECONDS,
 ) -> None:
     if interaction.guild is None:
         await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
@@ -7403,9 +7775,10 @@ async def slash_tradeauto_image(
         data["image_category_ids"] = category_ids
     if message is not None and message.strip():
         data["image_reminder_message"] = truncate_discord_text(message.strip(), 1800, DEFAULT_TRADE_IMAGE_REMINDER_MESSAGE)
+    data["image_reminder_cooldown_seconds"] = max(0, min(3600, int(cooldown_seconds)))
     await save_server_settings()
     await interaction.response.send_message(
-        "✅ Trade image reminder updated. Any image posted in the watched category/categories will get the ticket reminder.",
+        "✅ Trade image reminder updated. It now replaces the old reminder and waits the cooldown before posting again.",
         embed=build_trade_auto_embed(interaction.guild),
         ephemeral=True,
         allowed_mentions=discord.AllowedMentions.none(),
@@ -7417,7 +7790,7 @@ async def slash_tradeauto_image(
     enabled="Turn DMO reposts on or off",
     target_channel="Channel where DMO-for-trade posts should be copied",
     trigger="Trigger phrase to watch for. Default: DMO for Trade",
-    include_original_link="Include the original message jump link in the repost",
+    include_original_link="Fallback only if there is no text or attachment. Clean forward is used by default.",
 )
 @app_commands.checks.has_permissions(administrator=True)
 async def slash_tradeauto_dmo(
@@ -7425,7 +7798,7 @@ async def slash_tradeauto_dmo(
     enabled: bool,
     target_channel: discord.TextChannel | None = None,
     trigger: str = DEFAULT_TRADE_DMO_TRIGGER,
-    include_original_link: bool = True,
+    include_original_link: bool = False,
 ) -> None:
     if interaction.guild is None:
         await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
@@ -7434,11 +7807,228 @@ async def slash_tradeauto_dmo(
     data["dmo_forward_enabled"] = bool(enabled)
     if target_channel is not None:
         data["dmo_target_channel_id"] = target_channel.id
-    data["dmo_trigger"] = truncate_discord_text(trigger.strip() or DEFAULT_TRADE_DMO_TRIGGER, 80, DEFAULT_TRADE_DMO_TRIGGER)
+    clean_trigger = truncate_discord_text(trigger.strip() or DEFAULT_TRADE_DMO_TRIGGER, 80, DEFAULT_TRADE_DMO_TRIGGER)
+    data["dmo_trigger"] = clean_trigger
+    data["dmo_triggers"] = clean_trade_dmo_triggers(data.get("dmo_triggers", []), clean_trigger)
     data["dmo_include_original_link"] = bool(include_original_link)
     await save_server_settings()
     await interaction.response.send_message(
-        "✅ DMO-for-trade repost settings updated. Messages containing the trigger, including `(DMO for Trade)`, will be copied to the target channel.",
+        "✅ DMO-for-trade repost settings updated. Matching posts will be clean copied/forwarded to the target channel with no detection header.",
+        embed=build_trade_auto_embed(interaction.guild),
+        ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@tradeauto_group.command(name="dmoowneronly", description="Choose whether Auto DMO only forwards your/allowed users' posts")
+@app_commands.describe(enabled="On = only allowed users can trigger. Off = anyone can trigger DMO forwarding.")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_tradeauto_dmoowneronly(interaction: discord.Interaction, enabled: bool = True) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    data = get_trade_auto_config(interaction.guild.id)
+    data["dmo_owner_only"] = bool(enabled)
+    if enabled and not clean_trade_dmo_allowed_user_ids(data.get("dmo_allowed_user_ids", [])):
+        data["dmo_allowed_user_ids"] = DEFAULT_TRADE_DMO_ALLOWED_USER_IDS.copy()
+    await save_server_settings()
+    await interaction.response.send_message(
+        "✅ Auto DMO forwarding is now " + ("owner-only / allowed-users only." if enabled else "open to anyone using the DMO trigger phrases."),
+        embed=build_trade_auto_embed(interaction.guild),
+        ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@tradeauto_group.command(name="dmoallowed", description="List, add, remove, or reset users allowed to trigger Auto DMO")
+@app_commands.describe(
+    mode="Choose list, add, remove, or reset",
+    user="Discord member to add/remove",
+    user_id="Optional raw Discord user ID if the member is not selectable",
+)
+@app_commands.choices(
+    mode=[
+        app_commands.Choice(name="List", value="list"),
+        app_commands.Choice(name="Add", value="add"),
+        app_commands.Choice(name="Remove", value="remove"),
+        app_commands.Choice(name="Reset", value="reset"),
+    ]
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_tradeauto_dmoallowed(
+    interaction: discord.Interaction,
+    mode: str = "list",
+    user: discord.Member | None = None,
+    user_id: str = "",
+) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+
+    data = get_trade_auto_config(interaction.guild.id)
+    mode_clean = mode.lower().strip()
+    selected_ids = []
+    if user is not None:
+        selected_ids.append(user.id)
+    selected_ids.extend(clean_trade_dmo_allowed_user_ids(user_id))
+
+    if mode_clean == "list":
+        await interaction.response.send_message(
+            "✅ Auto DMO allowed users: " + format_dmo_allowed_users(interaction.guild, data),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+
+    if mode_clean == "reset":
+        data["dmo_owner_only"] = True
+        data["dmo_allowed_user_ids"] = DEFAULT_TRADE_DMO_ALLOWED_USER_IDS.copy()
+        await save_server_settings()
+        await interaction.response.send_message(
+            "✅ Auto DMO allowed users reset to your Discord ID only.",
+            embed=build_trade_auto_embed(interaction.guild),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+
+    if mode_clean == "add":
+        selected_ids = clean_trade_dmo_allowed_user_ids(selected_ids)
+        if not selected_ids:
+            await interaction.response.send_message("❌ Choose a user or paste a raw Discord user ID.", ephemeral=True)
+            return
+        data["dmo_owner_only"] = True
+        data["dmo_allowed_user_ids"] = clean_trade_dmo_allowed_user_ids(data.get("dmo_allowed_user_ids", []), selected_ids)
+        await save_server_settings()
+        await interaction.response.send_message(
+            "✅ User added to Auto DMO allowed list.",
+            embed=build_trade_auto_embed(interaction.guild),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+
+    if mode_clean == "remove":
+        remove_ids = set(clean_trade_dmo_allowed_user_ids(selected_ids))
+        if not remove_ids:
+            await interaction.response.send_message("❌ Choose a user or paste a raw Discord user ID to remove.", ephemeral=True)
+            return
+        data["dmo_allowed_user_ids"] = [
+            allowed_id
+            for allowed_id in clean_trade_dmo_allowed_user_ids(data.get("dmo_allowed_user_ids", []))
+            if allowed_id not in remove_ids
+        ]
+        if not data["dmo_allowed_user_ids"]:
+            data["dmo_allowed_user_ids"] = DEFAULT_TRADE_DMO_ALLOWED_USER_IDS.copy()
+        await save_server_settings()
+        await interaction.response.send_message(
+            "✅ User removed from Auto DMO allowed list.",
+            embed=build_trade_auto_embed(interaction.guild),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+
+    await interaction.response.send_message("❌ Use list, add, remove, or reset.", ephemeral=True)
+
+
+@tradeauto_group.command(name="dmotriggers", description="List, add, remove, or reset Auto DMO detection phrases")
+@app_commands.describe(
+    mode="Choose list, add, remove, or reset",
+    phrase="Phrase to add/remove, for example DMO trade or for DMO",
+)
+@app_commands.choices(
+    mode=[
+        app_commands.Choice(name="List", value="list"),
+        app_commands.Choice(name="Add", value="add"),
+        app_commands.Choice(name="Remove", value="remove"),
+        app_commands.Choice(name="Reset", value="reset"),
+    ]
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_tradeauto_dmotriggers(
+    interaction: discord.Interaction,
+    mode: str = "list",
+    phrase: str = "",
+) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+
+    data = get_trade_auto_config(interaction.guild.id)
+    mode_clean = mode.lower().strip()
+    phrase_clean = phrase.strip()
+
+    if mode_clean == "list":
+        triggers = clean_trade_dmo_triggers(data.get("dmo_triggers", []), data.get("dmo_trigger")) or DEFAULT_TRADE_DMO_TRIGGERS.copy()
+        await interaction.response.send_message(
+            "✅ Auto DMO detection phrases:\n" + "\n".join(f"- `{trigger}`" for trigger in triggers),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+
+    if mode_clean == "reset":
+        reset_trade_dmo_triggers(data)
+        await save_server_settings()
+        await interaction.response.send_message(
+            "✅ Auto DMO triggers reset to the default smart list.",
+            embed=build_trade_auto_embed(interaction.guild),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+
+    if mode_clean == "add":
+        new_triggers = clean_trade_dmo_triggers(phrase_clean)
+        if not new_triggers:
+            await interaction.response.send_message("❌ Add a phrase, for example `DMO trade` or `for DMO`.", ephemeral=True)
+            return
+        data["dmo_triggers"] = clean_trade_dmo_triggers(data.get("dmo_triggers", []), new_triggers)
+        await save_server_settings()
+        await interaction.response.send_message(
+            "✅ Auto DMO trigger added.",
+            embed=build_trade_auto_embed(interaction.guild),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+
+    if mode_clean == "remove":
+        if not phrase_clean:
+            await interaction.response.send_message("❌ Tell me which phrase to remove.", ephemeral=True)
+            return
+        remove_key = trade_auto_dmo_match_text(phrase_clean)
+        data["dmo_triggers"] = [
+            trigger for trigger in clean_trade_dmo_triggers(data.get("dmo_triggers", []))
+            if trade_auto_dmo_match_text(trigger) != remove_key
+        ]
+        if not data["dmo_triggers"]:
+            reset_trade_dmo_triggers(data)
+        await save_server_settings()
+        await interaction.response.send_message(
+            "✅ Auto DMO trigger removed.",
+            embed=build_trade_auto_embed(interaction.guild),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+
+    await interaction.response.send_message("❌ Use list, add, remove, or reset.", ephemeral=True)
+
+
+@tradeauto_group.command(name="cooldown", description="Set the image-reminder cooldown in seconds")
+@app_commands.describe(seconds="Cooldown in seconds before the bot posts/replaces the ticket reminder again. Use 120 for two minutes.")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_tradeauto_cooldown(interaction: discord.Interaction, seconds: int = DEFAULT_TRADE_IMAGE_REMINDER_COOLDOWN_SECONDS) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    data = get_trade_auto_config(interaction.guild.id)
+    data["image_reminder_cooldown_seconds"] = max(0, min(3600, int(seconds)))
+    await save_server_settings()
+    await interaction.response.send_message(
+        f"✅ Trade image reminder cooldown set to `{data['image_reminder_cooldown_seconds']}` seconds.",
         embed=build_trade_auto_embed(interaction.guild),
         ephemeral=True,
         allowed_mentions=discord.AllowedMentions.none(),
@@ -7472,7 +8062,7 @@ async def slash_tradeauto_reset(interaction: discord.Interaction) -> None:
     reset_trade_auto_config(interaction.guild.id)
     await save_server_settings()
     await interaction.response.send_message(
-        "✅ Trade auto settings reset to default category/channel IDs.",
+        "✅ Trade auto settings reset to default category/channel IDs, smart Auto DMO triggers, owner-only clean DMO forward, and 120-second reminder cooldown.",
         embed=build_trade_auto_embed(interaction.guild),
         ephemeral=True,
     )
