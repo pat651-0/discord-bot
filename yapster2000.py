@@ -27,8 +27,8 @@ from discord.ext import commands, tasks
 # python xsi_bot_full_setup_requiredpermissions.py
 # ============================================================
 
-VERSION = "XSI full setup build 2026-07-04 / ai-smartness-trade-auto-v15-owner-only-dmo"
-BUILD_TAG = "XSI-AI-SMARTNESS-TRADE-AUTO-V15-OWNER-ONLY-DMO"
+VERSION = "XSI full setup build 2026-07-04 / ai-smartness-trade-auto-v16-dmo-edit-support"
+BUILD_TAG = "XSI-AI-SMARTNESS-TRADE-AUTO-V16-DMO-EDIT-SUPPORT"
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
@@ -3189,6 +3189,20 @@ async def maybe_handle_trade_auto(message: discord.Message) -> bool:
     return image_sent or dmo_sent
 
 
+async def maybe_handle_trade_auto_message_edit(message: discord.Message) -> bool:
+    """Handle trade automation when an existing post is edited.
+
+    This is mainly for the common mobile workflow where a car picture is posted
+    first, then the message is edited to add "DMO for Trade". On edits we only
+    run the DMO forwarder; we intentionally do not run the image reminder again,
+    so editing a picture post will not create extra ticket-reminder spam.
+    """
+    if message.guild is None or message.author.bot:
+        return False
+    data = get_trade_auto_config(message.guild.id)
+    return await maybe_forward_dmo_trade_message(message, data)
+
+
 def extract_server_link(text: str) -> str | None:
     """Return a Discord invite link only.
 
@@ -5538,6 +5552,43 @@ async def on_message(message: discord.Message) -> None:
         return
 
     await bot.process_commands(message)
+
+
+@bot.event
+async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent) -> None:
+    """Forward DMO posts when the user edits a picture post to add the DMO trigger.
+
+    Discord's normal on_message event only runs when the message is first sent.
+    This raw edit event fetches the edited message, so the bot can see the final
+    text and attachments after a mobile edit. Duplicate protection in the DMO
+    forwarder prevents the same source message being forwarded twice.
+    """
+    if payload.guild_id is None:
+        return
+
+    guild = bot.get_guild(payload.guild_id)
+    if guild is None:
+        return
+
+    channel = bot.get_channel(payload.channel_id)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(payload.channel_id)
+        except discord.HTTPException:
+            return
+
+    if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+        return
+
+    try:
+        message = await channel.fetch_message(payload.message_id)
+    except discord.HTTPException:
+        return
+
+    if message.guild is None or message.guild.id != guild.id:
+        return
+
+    await maybe_handle_trade_auto_message_edit(message)
 
 
 # ============================================================
