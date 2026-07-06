@@ -11,7 +11,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import defaultdict, deque
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -27,8 +27,8 @@ from discord.ext import commands, tasks
 # python xsi_bot_full_setup_requiredpermissions.py
 # ============================================================
 
-VERSION = "XSI full setup build 2026-07-04 / ai-smartness-trade-auto-v16-dmo-edit-support"
-BUILD_TAG = "XSI-AI-SMARTNESS-TRADE-AUTO-V16-DMO-EDIT-SUPPORT"
+VERSION = "XSI full setup build 2026-07-05 / ai-smartness-trade-auto-v17-setunavailabledate"
+BUILD_TAG = "XSI-AI-SMARTNESS-TRADE-AUTO-V17-SETUNAVAILABLEDATE"
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
@@ -927,10 +927,215 @@ def make_unavailable_window(config: dict[str, Any], start_time: str, end_time: s
     return start_dt, end_dt
 
 
+MONTH_LOOKUP = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
+
+
+def _make_date(year: int, month: int, day: int) -> date:
+    try:
+        return date(year, month, day)
+    except ValueError as exc:
+        raise ValueError("Use a valid date, for example July 9 or 2026-07-09.") from exc
+
+
+def _add_one_year(value: date) -> date:
+    try:
+        return value.replace(year=value.year + 1)
+    except ValueError:
+        # Handles 29 February in non-leap years.
+        return value.replace(year=value.year + 1, day=28)
+
+
+def _add_one_month(value: date) -> date:
+    month = value.month + 1
+    year = value.year
+    if month > 12:
+        month = 1
+        year += 1
+    return _make_date(year, month, value.day)
+
+
+def _date_display(value: date) -> str:
+    return value.strftime("%d %b %Y").lstrip("0")
+
+
+def _clean_date_text(value: str) -> str:
+    raw = str(value or "").strip().lower()
+    raw = raw.replace(",", " ")
+    raw = re.sub(r"\bfrom\b", " ", raw)
+    raw = re.sub(r"(\d{1,2})(st|nd|rd|th)\b", r"\1", raw)
+    raw = re.sub(r"\s+", " ", raw)
+    return raw.strip()
+
+
+def parse_human_date(value: str, config: dict[str, Any], base_date: date | None = None) -> tuple[date, bool, bool]:
+    """Parse date strings used by /setunavailabledate.
+
+    Returns (parsed_date, explicit_year, explicit_month). Supported examples:
+    2026-07-09, 09/07/2026, July 9th, 9 July, 12th, today, tomorrow.
+    A day-only end date inherits the month/year from the start date.
+    """
+    tz = get_timezone(config)
+    today = datetime.now(tz).date()
+    default_year = base_date.year if base_date is not None else today.year
+    default_month = base_date.month if base_date is not None else today.month
+    raw = _clean_date_text(value)
+
+    if not raw:
+        raise ValueError("Use dates like `July 9`, `July 12`, or `2026-07-09`.")
+
+    if raw == "today":
+        return today, True, True
+    if raw == "tomorrow":
+        return today + timedelta(days=1), True, True
+
+    iso_match = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", raw)
+    if iso_match:
+        return _make_date(int(iso_match.group(1)), int(iso_match.group(2)), int(iso_match.group(3))), True, True
+
+    slash_match = re.fullmatch(r"(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?", raw)
+    if slash_match:
+        day = int(slash_match.group(1))
+        month = int(slash_match.group(2))
+        year_text = slash_match.group(3)
+        explicit_year = year_text is not None
+        year = default_year
+        if year_text is not None:
+            year = int(year_text)
+            if year < 100:
+                year += 2000
+        return _make_date(year, month, day), explicit_year, True
+
+    month_day_match = re.fullmatch(r"([a-z]+)\s+(\d{1,2})(?:\s+(\d{2,4}))?", raw)
+    if month_day_match and month_day_match.group(1) in MONTH_LOOKUP:
+        month = MONTH_LOOKUP[month_day_match.group(1)]
+        day = int(month_day_match.group(2))
+        year_text = month_day_match.group(3)
+        explicit_year = year_text is not None
+        year = default_year
+        if year_text is not None:
+            year = int(year_text)
+            if year < 100:
+                year += 2000
+        return _make_date(year, month, day), explicit_year, True
+
+    day_month_match = re.fullmatch(r"(\d{1,2})\s+([a-z]+)(?:\s+(\d{2,4}))?", raw)
+    if day_month_match and day_month_match.group(2) in MONTH_LOOKUP:
+        day = int(day_month_match.group(1))
+        month = MONTH_LOOKUP[day_month_match.group(2)]
+        year_text = day_month_match.group(3)
+        explicit_year = year_text is not None
+        year = default_year
+        if year_text is not None:
+            year = int(year_text)
+            if year < 100:
+                year += 2000
+        return _make_date(year, month, day), explicit_year, True
+
+    day_only_match = re.fullmatch(r"\d{1,2}", raw)
+    if day_only_match:
+        return _make_date(default_year, default_month, int(raw)), False, False
+
+    raise ValueError("Use dates like `July 9`, `July 12`, `9 July`, `12th`, or `2026-07-09`.")
+
+
+def make_unavailable_date_window(config: dict[str, Any], start_date_text: str, end_date_text: str) -> tuple[datetime, datetime, str]:
+    tz = get_timezone(config)
+    today = datetime.now(tz).date()
+
+    start_date, start_has_year, _ = parse_human_date(start_date_text, config)
+    end_date, end_has_year, end_has_month = parse_human_date(end_date_text, config, base_date=start_date)
+
+    if end_date < start_date:
+        if not end_has_month:
+            end_date = _add_one_month(end_date)
+        elif not end_has_year:
+            end_date = _add_one_year(end_date)
+
+    if end_date < start_date:
+        raise ValueError("End date must be the same as, or after, the start date.")
+
+    if end_date < today:
+        if not start_has_year and not end_has_year:
+            start_date = _add_one_year(start_date)
+            end_date = _add_one_year(end_date)
+        else:
+            raise ValueError("That unavailable date range has already ended.")
+
+    start_dt = datetime(start_date.year, start_date.month, start_date.day, 0, 0, tzinfo=tz)
+    # End date is inclusive for admins, so the internal end is midnight after the last date.
+    end_dt = datetime(end_date.year, end_date.month, end_date.day, 0, 0, tzinfo=tz) + timedelta(days=1)
+
+    if start_date == end_date:
+        date_label = f"on {_date_display(start_date)}"
+    else:
+        date_label = f"from {_date_display(start_date)} to {_date_display(end_date)}"
+    return start_dt, end_dt, date_label
+
+
+def parse_unavailable_date_prefix_args(raw_text: str, config: dict[str, Any]) -> tuple[datetime, datetime, str, str]:
+    """Parse prefix usage like:
+    !setunavailabledate July 9th to 12th
+    !setunavailabledate July 9th | July 12th | I am away.
+    """
+    text = str(raw_text or "").strip()
+    if not text:
+        raise ValueError(
+            "Use `!setunavailabledate July 9th to 12th` or "
+            "`!setunavailabledate July 9th | July 12th | I am away.`"
+        )
+
+    message = DEFAULT_UNAVAILABLE_MESSAGE
+    if "|" in text:
+        parts = [part.strip() for part in text.split("|")]
+        if len(parts) < 2 or not parts[0] or not parts[1]:
+            raise ValueError("Use `!setunavailabledate START_DATE | END_DATE | optional message`.")
+        start_text = parts[0]
+        end_text = parts[1]
+        if len(parts) >= 3 and "|".join(parts[2:]).strip():
+            message = "|".join(parts[2:]).strip()
+    else:
+        date_parts = re.split(r"\s+(?:to|until|through|till)\s+", text, maxsplit=1, flags=re.IGNORECASE)
+        if len(date_parts) != 2:
+            date_parts = re.split(r"\s+[–—-]\s+", text, maxsplit=1)
+        if len(date_parts) != 2:
+            raise ValueError("Use `!setunavailabledate July 9th to 12th`. Add a custom message with `| message`.")
+        start_text = date_parts[0].strip()
+        end_text = date_parts[1].strip()
+
+    start_dt, end_dt, date_label = make_unavailable_date_window(config, start_text, end_text)
+    return start_dt, end_dt, date_label, message
+
+
 def get_availability_state(guild_id: int) -> dict[str, Any]:
     config = guild_config(guild_id)
     tz = get_timezone(config)
     now = datetime.now(tz)
+    scheduled_unavailable_line: str | None = None
 
     temp = config.get("temporary_unavailable")
     if isinstance(temp, dict):
@@ -942,15 +1147,23 @@ def get_availability_state(guild_id: int) -> dict[str, Any]:
             end_dt = None
 
         if start_dt is not None and end_dt is not None:
+            date_label = str(temp.get("date_label") or "").strip()
             if start_dt <= now < end_dt:
+                panel_line = f"Unavailable {date_label} UK" if date_label else f"Unavailable until {format_dt(end_dt)} UK"
                 return {
                     "status": "temporary_unavailable",
                     "available": False,
                     "title": "Currently Unavailable",
-                    "panel_line": f"Unavailable until {format_dt(end_dt)} UK",
+                    "panel_line": panel_line,
                     "message": str(temp.get("message") or DEFAULT_UNAVAILABLE_MESSAGE),
                     "until": end_dt,
                 }
+            if now < start_dt:
+                scheduled_unavailable_line = (
+                    f"Scheduled unavailable {date_label} UK"
+                    if date_label
+                    else f"Scheduled unavailable from {format_dt(start_dt)} to {format_dt(end_dt)} UK"
+                )
             if now >= end_dt:
                 # Mark expired; caller may save during refresher/commands.
                 pass
@@ -975,6 +1188,8 @@ def get_availability_state(guild_id: int) -> dict[str, Any]:
     now_minutes = now.hour * 60 + now.minute
     currently_available = enabled and minutes_between(now_minutes, start_minutes, end_minutes)
     normal_line = f"Availability Times: {format_minutes(start_minutes)} to {format_minutes(end_minutes)} UK"
+    if scheduled_unavailable_line:
+        normal_line += f"\n{scheduled_unavailable_line}"
 
     if currently_available:
         return {
@@ -5603,7 +5818,7 @@ async def version_cmd(ctx: commands.Context) -> None:
 async def buildcheck_cmd(ctx: commands.Context) -> None:
     names = sorted(command.name for command in bot.tree.get_commands())
     critical = [
-        "clearsetup", "setunavailable", "refreshticketpanel", "changeticketui",
+        "clearsetup", "setunavailable", "setunavailabledate", "refreshticketpanel", "changeticketui",
         "customwelcome", "customticketmessage", "customticketopenmessage", "customguilt",
         "setavailability", "availability", "clearunavailable", "record", "setrecordcategory", "setrecordchannel", "ticket", "ticketuicustomation", "customiseticketui",
         "aisetup", "aiask", "aiticket", "aichannel", "aimodwatch"
@@ -6007,6 +6222,30 @@ async def setunavailable_prefix(ctx: commands.Context, start_time: str, end_time
     await save_server_settings()
     await send_or_update_ticket_panel(ctx.guild)
     await ctx.send(f"✅ Temporary unavailable set from {format_dt(start_dt)} to {format_dt(end_dt)} UK.")
+
+
+@bot.command(name="setunavailabledate", aliases=["unavailabledate", "setawaydate"])
+@commands.has_permissions(administrator=True)
+async def setunavailabledate_prefix(ctx: commands.Context, *, date_range: str = "") -> None:
+    if ctx.guild is None:
+        await ctx.send("❌ This command only works inside a server.")
+        return
+    config = guild_config(ctx.guild.id)
+    try:
+        start_dt, end_dt, date_label, message = parse_unavailable_date_prefix_args(date_range, config)
+    except ValueError as exc:
+        await ctx.send(f"❌ {exc}")
+        return
+    config["temporary_unavailable"] = {
+        "start_iso": start_dt.isoformat(),
+        "end_iso": end_dt.isoformat(),
+        "message": message,
+        "date_label": date_label,
+    }
+    config["last_availability_status"] = None
+    await save_server_settings()
+    await send_or_update_ticket_panel(ctx.guild)
+    await ctx.send(f"✅ Temporary unavailable date set {date_label} UK. Ticket panel will show unavailable during that date range.")
 
 
 @bot.command(name="clearunavailable")
@@ -7015,7 +7254,7 @@ async def slash_version(interaction: discord.Interaction) -> None:
 async def slash_buildcheck(interaction: discord.Interaction) -> None:
     names = sorted(command.name for command in bot.tree.get_commands())
     critical = [
-        "clearsetup", "setunavailable", "refreshticketpanel", "changeticketui",
+        "clearsetup", "setunavailable", "setunavailabledate", "refreshticketpanel", "changeticketui",
         "customwelcome", "customticketmessage", "customticketopenmessage", "customguilt",
         "setavailability", "availability", "clearunavailable", "record", "setrecordcategory", "setrecordchannel", "ticket", "ticketuicustomation", "customiseticketui",
         "aisetup", "aiask", "aiticket", "aichannel", "aimodwatch"
@@ -7613,6 +7852,43 @@ async def slash_setunavailable(
     await send_or_update_ticket_panel(interaction.guild)
     await interaction.response.send_message(
         f"✅ Temporary unavailable set from {format_dt(start_dt)} to {format_dt(end_dt)} UK. Ticket panel updated.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="setunavailabledate", description="Set all-day unavailable dates for the ticket panel")
+@app_commands.describe(
+    start_date="Example: July 9, 9 July, 2026-07-09, or 09/07/2026",
+    end_date="Example: July 12, 12 July, 2026-07-12, or just 12",
+    message="Message sent in tickets during unavailable dates",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_setunavailabledate(
+    interaction: discord.Interaction,
+    start_date: str,
+    end_date: str,
+    message: str = DEFAULT_UNAVAILABLE_MESSAGE,
+) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    config = guild_config(interaction.guild.id)
+    try:
+        start_dt, end_dt, date_label = make_unavailable_date_window(config, start_date, end_date)
+    except ValueError as exc:
+        await interaction.response.send_message(f"❌ {exc}", ephemeral=True)
+        return
+    config["temporary_unavailable"] = {
+        "start_iso": start_dt.isoformat(),
+        "end_iso": end_dt.isoformat(),
+        "message": message,
+        "date_label": date_label,
+    }
+    config["last_availability_status"] = None
+    await save_server_settings()
+    await send_or_update_ticket_panel(interaction.guild)
+    await interaction.response.send_message(
+        f"✅ Temporary unavailable date set {date_label} UK. Ticket panel will show unavailable during that date range.",
         ephemeral=True,
     )
 
@@ -8810,6 +9086,8 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
             "`!clearsetup keep`\n"
             "`!clearsetup delete_created YES`\n"
             "`!setunavailable 3pm 6pm I am unavailable right now.`\n"
+            "`!setunavailabledate July 9th to 12th`\n"
+            "`!setunavailabledate July 9th | July 12th | I am away.`\n"
             "`!refreshticketpanel`\n"
             "`!changeticketui Support | Buy Something | Report Issue`\n"
             "`!ticketbutton 1 Support | CATEGORY_ID | Explain your support issue. | 🎟️ | green`\n"
