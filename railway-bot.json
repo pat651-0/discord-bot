@@ -1,8 +1,33 @@
-{
-  "$schema": "https://railway.com/railway.schema.json",
-  "deploy": {
-    "startCommand": "python yapster2000.py",
-    "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 5
-  }
-}
+from __future__ import annotations
+
+import os
+import sys
+
+
+def main() -> None:
+    mode = os.getenv("XSI_SERVICE_MODE", "api").strip().lower()
+
+    if mode == "bot":
+        os.execv(
+            sys.executable,
+            [sys.executable, "yapster2000.py"],
+        )
+
+    port = os.getenv("PORT", "8000")
+    os.execv(
+        sys.executable,
+        [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "app:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            port,
+        ],
+    )
+
+
+if __name__ == "__main__":
+    main()
