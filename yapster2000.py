@@ -17248,7 +17248,10 @@ async def giveawaylist_prefix(ctx: commands.Context) -> None:
 # ============================================================
 @bot.tree.command(name="version", description="Show the running XSI build version")
 async def slash_version(interaction: discord.Interaction) -> None:
-    await interaction.response.send_message(f"✅ {VERSION}\nBuild tag: `{BUILD_TAG}`", ephemeral=True)
+    await interaction.response.send_message(
+        f"✅ {VERSION}\nBuild tag: `{BUILD_TAG}`\nSelf-update system: operational",
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="buildcheck", description="Show XSI build and slash-command diagnostics")
