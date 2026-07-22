@@ -431,6 +431,31 @@ recent_messages: defaultdict[str, deque[tuple[float, str]]] = defaultdict(deque)
 smart_cooldowns: dict[str, float] = {}
 ai_cooldowns: dict[str, float] = {}
 
+# ---------------- UPTIME TRACKING ----------------
+BOT_START_TIME = time.time()
+
+def format_uptime(seconds: float) -> str:
+    seconds = int(seconds)
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    parts = []
+    if days:
+        parts.append(f"{days} day{'s' if days != 1 else ''}")
+    if hours:
+        parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+    if minutes:
+        parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+    if not parts:
+        parts.append("less than 1 minute")
+    return "Online for " + ", ".join(parts) + "."
+
+@bot.command(name="uptime")
+async def uptime_command(ctx: commands.Context):
+    """Show how long the bot has been running."""
+    uptime = time.time() - BOT_START_TIME
+    await ctx.send(format_uptime(uptime))
+
 
 # ============================================================
 # CONFIG HELPERS
