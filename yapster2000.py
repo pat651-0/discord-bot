@@ -381,27 +381,30 @@ giveaway_lock = asyncio.Lock()
 
 
 async def save_server_settings() -> None:
-    save_json(SERVER_SETTINGS_FILE, server_settings)
+    # Snapshot on the event loop (atomic, no await) so the background
+    # thread serializes an isolated copy instead of the live dict, which
+    # other coroutines may still be mutating concurrently.
+    await asyncio.to_thread(save_json, SERVER_SETTINGS_FILE, dict(server_settings))
 
 
 async def save_warnings() -> None:
-    save_json(WARNINGS_FILE, warnings_store)
+    await asyncio.to_thread(save_json, WARNINGS_FILE, dict(warnings_store))
 
 
 async def save_ticket_owners() -> None:
-    save_json(TICKET_OWNERS_FILE, ticket_owners)
+    await asyncio.to_thread(save_json, TICKET_OWNERS_FILE, dict(ticket_owners))
 
 
 async def save_ticket_records() -> None:
-    save_json(TICKET_RECORDS_FILE, ticket_records)
+    await asyncio.to_thread(save_json, TICKET_RECORDS_FILE, dict(ticket_records))
 
 
 async def save_smart_messages() -> None:
-    save_json(SMART_MESSAGES_FILE, smart_messages)
+    await asyncio.to_thread(save_json, SMART_MESSAGES_FILE, dict(smart_messages))
 
 
 async def save_giveaways() -> None:
-    save_json(GIVEAWAYS_FILE, active_giveaways)
+    await asyncio.to_thread(save_json, GIVEAWAYS_FILE, dict(active_giveaways))
 
 
 # ---------------- BOT CLASS ----------------
@@ -13168,8 +13171,23 @@ SENTINEL_DEFAULTS: dict[str, Any] = {
     "lockdown_active": False,
     "lockdown_until_iso": None,
     "lockdown_backup": {},
+    "lockdown_level": "lock",
+    "lockdown_scope": "server",
     "last_raid_alert_at": 0,
 }
+# Shield escalation tiers, weakest first. "slow" only throttles (no permission
+# changes), "lock" denies sending, "full" also denies reactions/thread creation.
+SENTINEL_SHIELD_LEVELS = ("slow", "lock", "full")
+SENTINEL_SHIELD_SCOPES = ("server", "category", "channel")
+SENTINEL_SHIELD_SLOWMODE_SECONDS = 30
+# Voice/forum/stage were previously unreachable by lockdown, leaving raiders an
+# open channel. All four types are shieldable now.
+SENTINEL_SHIELD_CHANNEL_TYPES = (
+    discord.TextChannel,
+    discord.VoiceChannel,
+    discord.ForumChannel,
+    discord.StageChannel,
+)
 SENTINEL_MAX_PROOF_BYTES = 8 * 1024 * 1024
 SENTINEL_CHALLENGE_MINUTES = 20
 SENTINEL_RISK_DECAY_DAYS = 7
@@ -14751,24 +14769,91 @@ async def sentinel_evaluate_raid(guild: discord.Guild) -> dict[str, Any]:
     return result
 
 
-async def sentinel_lockdown_targets(guild: discord.Guild) -> list[discord.TextChannel]:
+def sentinel_shield_channel_ok(
+    channel: Any,
+    staff_log_id: int,
+    *,
+    skip_log_category: bool = True,
+) -> bool:
+    """Whether a channel may be shielded. The staff log is always spared so
+    staff keep a working channel while the shield is up."""
+    if not isinstance(channel, SENTINEL_SHIELD_CHANNEL_TYPES):
+        return False
+    if channel.id == staff_log_id:
+        return False
+    if skip_log_category and channel.category and channel.category.name.lower() == "xsi logs":
+        return False
+    return True
+
+
+async def sentinel_lockdown_targets(
+    guild: discord.Guild,
+    *,
+    scope: str = "server",
+    origin: Any = None,
+) -> list[Any]:
     config = get_sentinel_config(guild.id)
-    selected = clean_trade_auto_ids(config.get("protected_channel_ids", []))
     staff_log_id = _safe_int(guild_config(guild.id).get("staff_log_channel_id"), 0)
-    targets: list[discord.TextChannel] = []
+    scope = scope if scope in SENTINEL_SHIELD_SCOPES else "server"
+
+    if scope == "channel":
+        return [origin] if sentinel_shield_channel_ok(origin, staff_log_id) else []
+
+    if scope == "category":
+        category = getattr(origin, "category", None)
+        if category is None:
+            return []
+        return [c for c in category.channels if sentinel_shield_channel_ok(c, staff_log_id)]
+
+    # Server scope: an explicit protected-channel list wins and is taken at face
+    # value (no log-category filtering) because an admin chose those channels.
+    selected = clean_trade_auto_ids(config.get("protected_channel_ids", []))
     if selected:
+        targets: list[Any] = []
         for channel_id in selected:
             channel = guild.get_channel(channel_id)
-            if isinstance(channel, discord.TextChannel) and channel.id != staff_log_id:
+            if sentinel_shield_channel_ok(channel, staff_log_id, skip_log_category=False):
                 targets.append(channel)
         return targets
-    for channel in guild.text_channels:
-        if channel.id == staff_log_id:
-            continue
-        if channel.category and channel.category.name.lower() == "xsi logs":
-            continue
-        targets.append(channel)
-    return targets
+    return [c for c in guild.channels if sentinel_shield_channel_ok(c, staff_log_id)]
+
+
+async def sentinel_apply_shield_to_channel(
+    channel: Any,
+    guild: discord.Guild,
+    *,
+    level: str,
+    reason: str,
+) -> dict[str, Any] | None:
+    """Apply one shield tier to one channel. Returns the restore payload, or
+    None if the channel could not be shielded."""
+    audit = f"XSI Sentinel shield ({level}): {reason}"[:512]
+
+    if level == "slow":
+        current = getattr(channel, "slowmode_delay", None)
+        if not isinstance(current, int):
+            return None
+        try:
+            await channel.edit(slowmode_delay=SENTINEL_SHIELD_SLOWMODE_SECONDS, reason=audit)
+        except (discord.HTTPException, TypeError):
+            return None
+        return {"slowmode": current}
+
+    overwrite = channel.overwrites_for(guild.default_role)
+    allow, deny = overwrite.pair()
+    entry = {"allow": allow.value, "deny": deny.value}
+    overwrite.send_messages = False
+    if isinstance(channel, (discord.TextChannel, discord.ForumChannel)):
+        overwrite.send_messages_in_threads = False
+    if level == "full":
+        overwrite.add_reactions = False
+        overwrite.create_public_threads = False
+        overwrite.create_private_threads = False
+    try:
+        await channel.set_permissions(guild.default_role, overwrite=overwrite, reason=audit)
+    except discord.HTTPException:
+        return None
+    return entry
 
 
 async def sentinel_activate_lockdown(
@@ -14778,41 +14863,53 @@ async def sentinel_activate_lockdown(
     reason: str,
     actor: discord.Member | discord.User | None = None,
     automatic: bool = False,
+    level: str = "lock",
+    scope: str = "server",
+    origin: Any = None,
 ) -> tuple[bool, str]:
     config = get_sentinel_config(guild.id)
     if bool(config.get("lockdown_active", False)):
-        return False, "Sentinel lockdown is already active."
+        return False, "Sentinel shield is already active. Release it with `/sentinel unlock` first."
+    level = level if level in SENTINEL_SHIELD_LEVELS else "lock"
+    scope = scope if scope in SENTINEL_SHIELD_SCOPES else "server"
+    targets = await sentinel_lockdown_targets(guild, scope=scope, origin=origin)
+    if not targets:
+        return False, "No shieldable channels matched that scope."
+
     backup: dict[str, Any] = {}
     locked: list[str] = []
     failed: list[str] = []
-    for channel in await sentinel_lockdown_targets(guild):
-        overwrite = channel.overwrites_for(guild.default_role)
-        allow, deny = overwrite.pair()
-        backup[str(channel.id)] = {"allow": allow.value, "deny": deny.value}
-        overwrite.send_messages = False
-        try:
-            await channel.set_permissions(
-                guild.default_role,
-                overwrite=overwrite,
-                reason=f"XSI Sentinel lockdown: {reason}"[:512],
-            )
-            locked.append(channel.name)
-        except discord.HTTPException:
+    for channel in targets:
+        entry = await sentinel_apply_shield_to_channel(channel, guild, level=level, reason=reason)
+        if entry is None:
             failed.append(channel.name)
+            continue
+        backup[str(channel.id)] = entry
+        locked.append(channel.name)
+
+    if not locked:
+        return False, f"Shield failed on all {len(failed)} channel(s) — check the bot's permissions."
+
     until = datetime.now(UK_TIMEZONE) + timedelta(minutes=max(1, duration_minutes))
     config["lockdown_active"] = True
     config["mode"] = "lockdown"
     config["lockdown_until_iso"] = until.isoformat()
     config["lockdown_backup"] = backup
+    config["lockdown_level"] = level
+    config["lockdown_scope"] = scope
     await save_server_settings()
     actor_text = actor.mention if actor is not None else ("automatic Sentinel policy" if automatic else "Sentinel")
     await send_staff_log(
         guild,
-        f"🚨 **Sentinel lockdown activated** by {actor_text}.\nReason: {reason}\n"
-        f"Locked `{len(locked)}` channels until `{until.strftime('%Y-%m-%d %H:%M %Z')}`. "
-        f"Failures: `{len(failed)}`. Lockdown will roll back automatically.",
+        f"🚨 **Sentinel shield activated** by {actor_text}.\n"
+        f"Level: `{level}` · Scope: `{scope}`\nReason: {reason}\n"
+        f"Shielded `{len(locked)}` channels until `{until.strftime('%Y-%m-%d %H:%M %Z')}`. "
+        f"Failures: `{len(failed)}`. The shield rolls back automatically.",
     )
-    return True, f"Locked {len(locked)} channel(s); {len(failed)} failed. Automatic unlock: {until.strftime('%H:%M %Z')}."
+    return True, (
+        f"Shield `{level}` applied to {len(locked)} channel(s) ({scope} scope); "
+        f"{len(failed)} failed. Automatic release: {until.strftime('%H:%M %Z')}."
+    )
 
 
 async def sentinel_release_lockdown(
@@ -14824,29 +14921,31 @@ async def sentinel_release_lockdown(
     config = get_sentinel_config(guild.id)
     backup = config.get("lockdown_backup")
     if not bool(config.get("lockdown_active", False)) and (not isinstance(backup, dict) or not backup):
-        return False, "Sentinel lockdown is not active."
+        return False, "Sentinel shield is not active."
     backup = backup if isinstance(backup, dict) else {}
     restored = 0
     failed = 0
     for channel_id, raw in backup.items():
         channel = guild.get_channel(_safe_int(channel_id, 0))
-        if not isinstance(channel, discord.TextChannel) or not isinstance(raw, dict):
+        if channel is None or not isinstance(raw, dict):
             continue
         try:
-            allow = discord.Permissions(_safe_int(raw.get("allow"), 0))
-            deny = discord.Permissions(_safe_int(raw.get("deny"), 0))
-            overwrite = discord.PermissionOverwrite.from_pair(allow, deny)
-            await channel.set_permissions(
-                guild.default_role,
-                overwrite=overwrite,
-                reason=f"XSI Sentinel unlock: {reason}"[:512],
-            )
+            audit = f"XSI Sentinel unlock: {reason}"[:512]
+            if "slowmode" in raw:
+                await channel.edit(slowmode_delay=_safe_int(raw.get("slowmode"), 0), reason=audit)
+            else:
+                allow = discord.Permissions(_safe_int(raw.get("allow"), 0))
+                deny = discord.Permissions(_safe_int(raw.get("deny"), 0))
+                overwrite = discord.PermissionOverwrite.from_pair(allow, deny)
+                await channel.set_permissions(guild.default_role, overwrite=overwrite, reason=audit)
             restored += 1
-        except discord.HTTPException:
+        except (discord.HTTPException, TypeError):
             failed += 1
     config["lockdown_active"] = False
     config["lockdown_until_iso"] = None
     config["lockdown_backup"] = {}
+    config["lockdown_level"] = "lock"
+    config["lockdown_scope"] = "server"
     config["mode"] = "guard"
     await save_server_settings()
     actor_text = actor.mention if actor is not None else "automatic rollback"
@@ -15106,7 +15205,11 @@ def build_sentinel_embed(guild: discord.Guild) -> discord.Embed:
     )
     embed.add_field(name="Mode", value=f"`{mode.upper()}`", inline=True)
     embed.add_field(name="AI", value="✅ Ready" if openai_api_key() and config.get("ai_enabled") else "⚠️ Deterministic only", inline=True)
-    embed.add_field(name="Lockdown", value="🚨 Active" if config.get("lockdown_active") else "✅ Inactive", inline=True)
+    if config.get("lockdown_active"):
+        shield_value = f"🚨 Active (`{config.get('lockdown_level', 'lock')}` / `{config.get('lockdown_scope', 'server')}`)"
+    else:
+        shield_value = "✅ Inactive"
+    embed.add_field(name="Shield", value=shield_value, inline=True)
     embed.add_field(
         name="Defensive thresholds",
         value=(
@@ -15134,7 +15237,7 @@ def build_sentinel_embed(guild: discord.Guild) -> discord.Embed:
             "• Deterministic policy gate\n"
             "• Prompt-injection isolation\n"
             "• No AI-only permanent bans\n"
-            "• Timed lockdown rollback\n"
+            "• Timed shield rollback\n"
             "• Configurable data retention"
         ),
         inline=False,
@@ -15263,12 +15366,33 @@ async def sentinel_verify_prefix(ctx: commands.Context, member: discord.Member) 
     await ctx.send(f"✅ Fresh-proof verification approved for {member.mention}.")
 
 
-@sentinel_prefix.command(name="lockdown")
+@sentinel_prefix.command(name="shield", aliases=["lockdown"])
 @commands.has_permissions(administrator=True)
-async def sentinel_lockdown_prefix(ctx: commands.Context, minutes: int = 15, *, reason: str = "Manual security lockdown") -> None:
+async def sentinel_shield_prefix(
+    ctx: commands.Context,
+    level: str = "lock",
+    scope: str = "server",
+    minutes: int = 15,
+    *,
+    reason: str = "Manual security shield",
+) -> None:
     if ctx.guild is None:
         return
-    ok, text = await sentinel_activate_lockdown(ctx.guild, duration_minutes=max(1, min(1440, minutes)), reason=reason, actor=ctx.author)
+    if level not in SENTINEL_SHIELD_LEVELS:
+        await ctx.send(f"❌ Level must be one of: {', '.join(f'`{l}`' for l in SENTINEL_SHIELD_LEVELS)}.")
+        return
+    if scope not in SENTINEL_SHIELD_SCOPES:
+        await ctx.send(f"❌ Scope must be one of: {', '.join(f'`{s}`' for s in SENTINEL_SHIELD_SCOPES)}.")
+        return
+    ok, text = await sentinel_activate_lockdown(
+        ctx.guild,
+        duration_minutes=max(1, min(1440, minutes)),
+        reason=reason,
+        actor=ctx.author,
+        level=level,
+        scope=scope,
+        origin=ctx.channel,
+    )
     await ctx.send(("✅ " if ok else "⚠️ ") + text)
 
 
@@ -15414,22 +15538,66 @@ async def slash_sentinel_verify(interaction: discord.Interaction, member: discor
     await interaction.response.send_message(f"✅ Fresh-proof verification approved for {member.mention}.")
 
 
-@sentinel_group.command(name="lockdown", description="Lock protected/public channels with timed rollback")
+@sentinel_group.command(
+    name="shield",
+    description="Graduated raid shield: pick a level and scope, preview it, auto-rollback",
+)
 @app_commands.checks.has_permissions(administrator=True)
-async def slash_sentinel_lockdown(
+@app_commands.describe(
+    level="slow = 30s slowmode only · lock = block sending · full = block sending, reactions and threads",
+    scope="Which channels to shield",
+    minutes="Minutes before automatic rollback (1-1440)",
+    preview="Show exactly what would be shielded without changing anything",
+    reason="Logged to the staff channel and the Discord audit log",
+)
+@app_commands.choices(
+    level=[
+        app_commands.Choice(name="Slow - 30s slowmode, nothing blocked", value="slow"),
+        app_commands.Choice(name="Lock - block sending", value="lock"),
+        app_commands.Choice(name="Full - block sending, reactions and threads", value="full"),
+    ],
+    scope=[
+        app_commands.Choice(name="Whole server", value="server"),
+        app_commands.Choice(name="This category", value="category"),
+        app_commands.Choice(name="This channel only", value="channel"),
+    ],
+)
+async def slash_sentinel_shield(
     interaction: discord.Interaction,
+    level: str = "lock",
+    scope: str = "server",
     minutes: int = 15,
-    reason: str = "Manual security lockdown",
+    preview: bool = False,
+    reason: str = "Manual security shield",
 ) -> None:
     if interaction.guild is None:
         await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True, thinking=True)
+
+    if preview:
+        targets = await sentinel_lockdown_targets(interaction.guild, scope=scope, origin=interaction.channel)
+        if not targets:
+            await interaction.followup.send("⚠️ No shieldable channels matched that scope.", ephemeral=True)
+            return
+        shown = ", ".join(f"#{c.name}" for c in targets[:25])
+        extra = f" …and {len(targets) - 25} more" if len(targets) > 25 else ""
+        await interaction.followup.send(
+            f"🔍 **Preview — nothing was changed.**\n"
+            f"Level `{level}` · scope `{scope}` would affect **{len(targets)}** channel(s):\n{shown}{extra}\n"
+            f"Run again with `preview: False` to apply.",
+            ephemeral=True,
+        )
+        return
+
     ok, text = await sentinel_activate_lockdown(
         interaction.guild,
         duration_minutes=max(1, min(1440, minutes)),
         reason=reason,
         actor=interaction.user,
+        level=level,
+        scope=scope,
+        origin=interaction.channel,
     )
     await interaction.followup.send(("✅ " if ok else "⚠️ ") + text, ephemeral=True)
 
