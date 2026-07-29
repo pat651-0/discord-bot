@@ -13191,6 +13191,9 @@ SENTINEL_SHIELD_CHANNEL_TYPES = (
 SENTINEL_MAX_PROOF_BYTES = 8 * 1024 * 1024
 SENTINEL_CHALLENGE_MINUTES = 20
 SENTINEL_RISK_DECAY_DAYS = 7
+# Reverse identifier lookup: which accounts have used one PSN / invite.
+SENTINEL_LOOKUP_KINDS = ("psn", "discord_invite")
+SENTINEL_LOOKUP_LIMIT = 15
 SENTINEL_URL_RE = re.compile(r"https?://[^\s<>]+", flags=re.IGNORECASE)
 SENTINEL_EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", flags=re.IGNORECASE)
 SENTINEL_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
@@ -13694,6 +13697,45 @@ def _sentinel_identifier_links_sync(guild_id: int, user_id: int) -> list[dict[st
 async def sentinel_identifier_links(guild_id: int, user_id: int) -> list[dict[str, Any]]:
     async with sentinel_db_lock:
         return await asyncio.to_thread(_sentinel_identifier_links_sync, guild_id, user_id)
+
+
+def _sentinel_identifier_accounts_sync(guild_id: int, kind: str, value: str, limit: int) -> list[dict[str, Any]]:
+    connection = _sentinel_connect()
+    try:
+        rows = connection.execute(
+            """
+            SELECT user_id, verified, first_seen, last_seen
+            FROM sentinel_identifiers
+            WHERE guild_id=? AND kind=? AND value=?
+            ORDER BY last_seen DESC
+            LIMIT ?
+            """,
+            (guild_id, kind, value, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        connection.close()
+
+
+async def sentinel_identifier_accounts(
+    guild_id: int,
+    kind: str,
+    value: Any,
+    limit: int = SENTINEL_LOOKUP_LIMIT,
+) -> list[dict[str, Any]]:
+    """Reverse lookup: every account in this guild that used one identifier value.
+
+    sentinel_identifier_links answers "who is related to this member?".
+    This answers the trade-desk question "who has used this PSN before?".
+    Uses idx_sentinel_identifiers_value, so it stays cheap as the table grows.
+    """
+    normalized = sentinel_normalize_identifier(kind, value)
+    if not normalized:
+        return []
+    async with sentinel_db_lock:
+        return await asyncio.to_thread(
+            _sentinel_identifier_accounts_sync, guild_id, kind, normalized, max(1, int(limit))
+        )
 
 
 def _sentinel_identifier_owned_sync(guild_id: int, user_id: int, kind: str, value: str) -> bool:
@@ -15274,6 +15316,91 @@ def build_sentinel_profile_embed(member: discord.Member, profile: dict[str, Any]
     return embed
 
 
+def sentinel_parse_lookup_query(raw: str) -> tuple[str, str]:
+    """Split `!sentinel lookup [kind] <value>` into (kind, value).
+
+    The kind prefix is optional; PSN is the common case so it is the default.
+    """
+    text = str(raw or "").strip()
+    parts = text.split(maxsplit=1)
+    if len(parts) == 2 and parts[0].lower() in SENTINEL_LOOKUP_KINDS:
+        return parts[0].lower(), parts[1].strip()
+    return "psn", text
+
+
+async def sentinel_run_lookup(guild: discord.Guild, kind: str, value: str) -> discord.Embed | None:
+    """Return the lookup embed, or None when the value normalises to nothing."""
+    clean_kind = kind if kind in SENTINEL_LOOKUP_KINDS else "psn"
+    normalized = sentinel_normalize_identifier(clean_kind, value)
+    if not normalized:
+        return None
+    rows = await sentinel_identifier_accounts(guild.id, clean_kind, normalized)
+    return build_sentinel_lookup_embed(guild, clean_kind, normalized, rows)
+
+
+def build_sentinel_lookup_embed(
+    guild: discord.Guild,
+    kind: str,
+    value: str,
+    rows: list[dict[str, Any]],
+) -> discord.Embed:
+    # Backticks are stripped rather than escaped so the code span cannot be broken
+    # out of by a crafted PSN. The value is already NFKC-normalised and length-capped.
+    safe_value = str(value).replace("`", "")
+    kind_label = "PSN" if kind == "psn" else "Discord invite"
+    count = len(rows)
+
+    if count == 0:
+        color = discord.Color.greyple()
+    elif count == 1:
+        color = discord.Color.green()
+    else:
+        color = discord.Color.red()
+
+    embed = discord.Embed(
+        title=f"🔎 Sentinel identifier lookup — {kind_label}",
+        description=f"`{safe_value}`",
+        color=color,
+        timestamp=datetime.now(UK_TIMEZONE),
+    )
+
+    if count == 0:
+        embed.add_field(
+            name="Accounts seen using this",
+            value="`0` — this identifier has never been recorded in this server.",
+            inline=False,
+        )
+        embed.set_footer(text="Nothing recorded is not the same as safe. Ask for fresh proof if unsure.")
+        return embed
+
+    lines: list[str] = []
+    for row in rows:
+        user_id = _safe_int(row.get("user_id"), 0)
+        member = guild.get_member(user_id)
+        who = member.mention if member is not None else f"Unknown user `{user_id}`"
+        tick = "✅ verified" if _safe_int(row.get("verified"), 0) else "unverified"
+        lines.append(
+            f"• {who} — {tick} — first seen {_record_short_time(row.get('first_seen'))}"
+            f", last seen {_record_short_time(row.get('last_seen'))}"
+        )
+
+    embed.add_field(name="Accounts seen using this", value=f"`{count}`", inline=False)
+    embed.add_field(name="Accounts", value=truncate_discord_text("\n".join(lines), 1024), inline=False)
+
+    if count > 1:
+        embed.add_field(
+            name="⚠️ Shared identifier",
+            value="More than one account has used this. Review before approving a trade.",
+            inline=False,
+        )
+
+    footer = "Shared identifiers are leads for staff review, not proof of wrongdoing."
+    if count >= SENTINEL_LOOKUP_LIMIT:
+        footer = f"Showing newest {SENTINEL_LOOKUP_LIMIT} accounts only. " + footer
+    embed.set_footer(text=footer)
+    return embed
+
+
 async def sentinel_delete_member_data(guild_id: int, user_id: int) -> None:
     def delete_sync() -> None:
         connection = _sentinel_connect()
@@ -15339,6 +15466,23 @@ async def sentinel_profile_prefix(ctx: commands.Context, member: discord.Member 
     links = await sentinel_identifier_links(ctx.guild.id, target.id)
     events = await sentinel_recent_events(ctx.guild.id, target.id, 8)
     await ctx.send(embed=build_sentinel_profile_embed(target, profile, links, events))
+
+
+@sentinel_prefix.command(name="lookup", aliases=["psn", "whoused"])
+@commands.has_permissions(manage_messages=True)
+async def sentinel_lookup_prefix(ctx: commands.Context, *, query: str = "") -> None:
+    if ctx.guild is None:
+        return
+    kind, value = sentinel_parse_lookup_query(query)
+    embed = await sentinel_run_lookup(ctx.guild, kind, value)
+    if embed is None:
+        await ctx.send(
+            "❌ Give me something to look up.\n"
+            "`!sentinel lookup xX_Trader_Xx`\n"
+            "`!sentinel lookup discord_invite discord.gg/example`"
+        )
+        return
+    await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 
 @sentinel_prefix.command(name="challenge")
@@ -15508,6 +15652,31 @@ async def slash_sentinel_profile(interaction: discord.Interaction, member: disco
     links = await sentinel_identifier_links(interaction.guild.id, member.id)
     events = await sentinel_recent_events(interaction.guild.id, member.id, 8)
     await interaction.response.send_message(embed=build_sentinel_profile_embed(member, profile, links, events), ephemeral=True)
+
+
+@sentinel_group.command(name="lookup", description="Find every account that has used one PSN or invite")
+@app_commands.describe(
+    value="PSN or Discord invite to look up, for example xX_Trader_Xx",
+    kind="What the value is. Defaults to PSN.",
+)
+@app_commands.choices(kind=[
+    app_commands.Choice(name="PSN", value="psn"),
+    app_commands.Choice(name="Discord invite", value="discord_invite"),
+])
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_sentinel_lookup(interaction: discord.Interaction, value: str, kind: str = "psn") -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ This only works inside a server.", ephemeral=True)
+        return
+    embed = await sentinel_run_lookup(interaction.guild, kind, value)
+    if embed is None:
+        await interaction.response.send_message("❌ Give me a PSN or invite to look up.", ephemeral=True)
+        return
+    await interaction.response.send_message(
+        embed=embed,
+        ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
 
 
 @sentinel_group.command(name="challenge", description="Require a member to submit fresh visual proof")
@@ -17309,11 +17478,6 @@ async def rules(ctx: commands.Context) -> None:
         color=discord.Color.red(),
     )
     await ctx.send(embed=embed)
-
-
-@bot.command(name="slotinfo")
-async def slotinfo(ctx: commands.Context) -> None:
-    await ctx.send("❌ Sloty has been removed from this bot.")
 
 
 @bot.command(name="giveaway")
@@ -19162,11 +19326,6 @@ async def slash_rules(interaction: discord.Interaction) -> None:
         color=discord.Color.red(),
     )
     await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name="slotinfo", description="Show Sloty removal notice")
-async def slash_slotinfo(interaction: discord.Interaction) -> None:
-    await interaction.response.send_message("❌ Sloty has been removed from this bot.")
 
 
 @bot.tree.command(name="giveaway", description="Start a giveaway")
